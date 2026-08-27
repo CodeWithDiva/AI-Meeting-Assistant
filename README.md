@@ -8,6 +8,8 @@ extract decisions, assign tasks, and answer questions during meetings.
 
 🚧 Day 1 — Project Initialization
 
+The backend foundation is mapped at `backend/app`. The platform decision is deliberately deferred until the Day 2–3 live tests are complete. See [the Day 1 feasibility report](docs/feasibility/day-01-platform-feasibility.md).
+
 ## Planned Features
 
 - AI meeting agent
