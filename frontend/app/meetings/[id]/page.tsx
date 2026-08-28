@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ChangeEvent, FormEvent, useEffect, useState } from "react";
+import LiveRecorder from "@/app/components/LiveRecorder";
 import {
   ActionItem,
   api,
@@ -46,10 +47,11 @@ export default function MeetingDetailPage() {
   const [editSpeakerName, setEditSpeakerName] = useState("");
   const [updatingSpeaker, setUpdatingSpeaker] = useState(false);
 
-  // AI Meeting Chat state (Block 2)
+  // AI Meeting Chat state (Block 2) + TTS (Block 3)
   const [chatMessages, setChatMessages] = useState<{ sender: "user" | "ai"; text: string; sources?: string[] }[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [playingTTS, setPlayingTTS] = useState(false);
 
   // Agent status
   const [agentState, setAgentState] = useState<string>("idle");
@@ -197,6 +199,55 @@ export default function MeetingDetailPage() {
     }
   }
 
+  // Block 3: Speak AI answer aloud with TTS
+  async function handleSpeakText(text: string) {
+    if (playingTTS) return;
+    setPlayingTTS(true);
+
+    try {
+      // 1. Try browser SpeechSynthesis for instant natural voice
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1.0;
+        utterance.onend = () => setPlayingTTS(false);
+        utterance.onerror = () => setPlayingTTS(false);
+        window.speechSynthesis.speak(utterance);
+        return;
+      }
+
+      // 2. Fallback to server TTS synthesis
+      const res = await api.speakText(meetingId, text);
+      if (res.audio_base64) {
+        const audio = new Audio(`data:${res.content_type};base64,${res.audio_base64}`);
+        audio.onended = () => setPlayingTTS(false);
+        audio.onerror = () => setPlayingTTS(false);
+        audio.play();
+      } else {
+        setPlayingTTS(false);
+      }
+    } catch {
+      setPlayingTTS(false);
+    }
+  }
+
+  // Block 3: Live mic segment callback
+  function handleLiveSegment(newSeg: Segment) {
+    if (!meeting) return;
+    const updatedSegments = [...(meeting.segments || []), newSeg];
+    const updatedTranscript = `${meeting.transcript || ""} ${newSeg.text}`.trim();
+    setMeeting({
+      ...meeting,
+      segments: updatedSegments,
+      transcript: updatedTranscript,
+    });
+  }
+
+  function handleLiveActionCreated(taskText: string) {
+    setSuccess(`Auto-detected live action item: "${taskText}"`);
+    loadMeetingData();
+  }
+
   async function handleToggleTaskStatus(taskId: number, currentStatus: string) {
     const nextStatus = currentStatus === "done" ? "pending" : "done";
     try {
@@ -327,7 +378,7 @@ export default function MeetingDetailPage() {
       <div
         className="glass-panel"
         style={{
-          marginBottom: 20,
+          marginBottom: 16,
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
@@ -394,6 +445,13 @@ export default function MeetingDetailPage() {
           </button>
         </div>
       </div>
+
+      {/* Block 3: Live Microphone Stream Component */}
+      <LiveRecorder
+        meetingId={meetingId}
+        onNewSegment={handleLiveSegment}
+        onLiveActionCreated={handleLiveActionCreated}
+      />
 
       {/* Alerts */}
       {error && <div className="alert-box alert-error">{error}</div>}
@@ -478,7 +536,7 @@ export default function MeetingDetailPage() {
                   </button>
                 ) : (
                   <p style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-                    Upload an audio recording to generate transcript and summary.
+                    Use the Live Mic above or upload audio to generate transcript and summary.
                   </p>
                 )}
               </div>
@@ -627,7 +685,7 @@ export default function MeetingDetailPage() {
           </div>
         )}
 
-        {/* TRANSCRIPT TAB (with Speaker Diarization Mapping) */}
+        {/* TRANSCRIPT TAB (with Speaker Diarization Mapping & Search) */}
         {activeTab === "transcript" && (
           <div>
             {/* Speaker identification bar */}
@@ -783,7 +841,7 @@ export default function MeetingDetailPage() {
           </div>
         )}
 
-        {/* AI MEETING CHAT TAB (Block 2) */}
+        {/* AI MEETING CHAT TAB (Block 2) with TTS Voice (Block 3) */}
         {activeTab === "chat" && (
           <div>
             <div style={{ marginBottom: 16 }}>
@@ -861,11 +919,27 @@ export default function MeetingDetailPage() {
                     }}
                   >
                     <p style={{ whiteSpace: "pre-wrap" }}>{msg.text}</p>
-                    {msg.sources && msg.sources.length > 0 && (
-                      <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>
-                        Sources: {msg.sources.join(" · ")}
-                      </div>
-                    )}
+                    
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, gap: 10 }}>
+                      {msg.sources && msg.sources.length > 0 ? (
+                        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                          Sources: {msg.sources.join(" · ")}
+                        </span>
+                      ) : <span />}
+
+                      {msg.sender === "ai" && (
+                        <button
+                          type="button"
+                          onClick={() => handleSpeakText(msg.text)}
+                          className="btn btn-secondary btn-sm"
+                          style={{ padding: "2px 6px", fontSize: 11 }}
+                          title="Read aloud with Text-to-Speech"
+                          disabled={playingTTS}
+                        >
+                          {playingTTS ? "🔊 Speaking..." : "🔊 Read Aloud"}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ))
               )}

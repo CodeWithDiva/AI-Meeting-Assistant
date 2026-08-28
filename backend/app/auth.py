@@ -54,21 +54,25 @@ def create_access_token(user_id: int) -> str:
     return f"{header}.{payload}.{signature}"
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+def get_user_from_token(token: str, db: Session) -> User | None:
     secret = os.getenv("SECRET_KEY")
-    if not secret:
-        raise HTTPException(status_code=503, detail="SECRET_KEY is not configured.")
+    if not secret or not token:
+        return None
     try:
         header, payload, signature = token.split(".")
         expected = _b64(hmac.new(secret.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest())
         if not hmac.compare_digest(signature, expected):
-            raise ValueError
+            return None
         data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
         if int(data["exp"]) < int(time.time()):
-            raise ValueError
-        user = db.get(User, int(data["sub"]))
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
-        user = None
+            return None
+        return db.get(User, int(data["sub"]))
+    except Exception:
+        return None
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    user = get_user_from_token(token, db)
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token.")
     return user
