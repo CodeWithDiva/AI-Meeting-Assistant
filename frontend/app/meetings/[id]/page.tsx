@@ -987,14 +987,14 @@ export default function MeetingDetailPage() {
           </div>
         )}
 
-        {/* AGENT TAB */}
+        {/* AGENT & ZOOM BOT TAB */}
         {activeTab === "agent" && (
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
               <div>
-                <h3 style={{ fontSize: 16, marginBottom: 4 }}>Assistant Agent Status</h3>
+                <h3 style={{ fontSize: 16, marginBottom: 4 }}>Zoom Bot & AI Assistant Agent</h3>
                 <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                  Simulated agent runtime for live meeting capture and assistance.
+                  Autonomous bot client that joins live Zoom meetings and streams audio.
                 </p>
               </div>
 
@@ -1009,32 +1009,45 @@ export default function MeetingDetailPage() {
                   }`}
                   style={{ textTransform: "uppercase" }}
                 >
-                  Status: {agentState}
+                  Bot Status: {agentState}
                 </span>
               </div>
             </div>
 
+            {/* Zoom Meeting Join Card */}
             <div
               style={{
                 background: "var(--bg-input)",
-                padding: 18,
+                padding: 20,
                 borderRadius: "var(--radius-sm)",
                 border: "1px solid var(--border-subtle)",
+                marginBottom: 16,
               }}
             >
-              <div style={{ display: "flex", gap: 10 }}>
+              <h4 style={{ fontSize: 14, marginBottom: 10 }}>Connect Bot to Live Zoom Meeting</h4>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <input
+                  type="text"
+                  className="form-input"
+                  style={{ flex: 1, minWidth: 260 }}
+                  placeholder="Paste Zoom Meeting Link or ID (e.g. https://zoom.us/j/123456789)..."
+                />
                 <button
+                  type="button"
                   onClick={handleAgentToggle}
                   className={`btn btn-sm ${agentState === "listening" ? "btn-danger" : "btn-primary"}`}
                   disabled={agentBusy}
                 >
                   {agentBusy
-                    ? "Updating..."
+                    ? "Connecting..."
                     : agentState === "listening"
-                    ? "Stop Agent"
-                    : "Start Agent"}
+                    ? "Disconnect Zoom Bot"
+                    : "Join Zoom Meeting"}
                 </button>
               </div>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
+                The bot will connect via Zoom RTMS, capture the audio, and populate the live transcript in real-time.
+              </p>
             </div>
           </div>
         )}
