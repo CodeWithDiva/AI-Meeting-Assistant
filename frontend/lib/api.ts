@@ -120,6 +120,17 @@ export interface ChatAnswer {
   sources: string[];
 }
 
+export interface NotificationItem {
+  id: number;
+  user_id: number;
+  meeting_id?: number | null;
+  type: string;
+  title: string;
+  body?: string | null;
+  read: boolean;
+  created_at?: string | null;
+}
+
 export function getApiBase(): string {
   if (typeof window !== "undefined") {
     const host = window.location.hostname || "localhost";
@@ -392,6 +403,41 @@ export const api = {
     const token = authStorage.getToken() || "";
     const base = getApiBase().replace(/^http/, "ws");
     return `${base}/ws/meetings/${meetingId}/live?token=${encodeURIComponent(token)}`;
+  },
+
+  // Zoom Bot (Block 4)
+  async joinZoomMeeting(meetingId: number | string, zoomUrlOrId: string): Promise<{ status: string; message: string }> {
+    return apiRequest<{ status: string; message: string }>(`/api/zoom/join/${meetingId}`, {
+      method: "POST",
+      body: JSON.stringify({ zoom_url_or_id: zoomUrlOrId }),
+    });
+  },
+
+  async leaveZoomMeeting(meetingId: number | string): Promise<{ status: string; message: string }> {
+    return apiRequest<{ status: string; message: string }>(`/api/zoom/leave/${meetingId}`, {
+      method: "POST",
+    });
+  },
+
+  async getZoomStatus(meetingId: number | string): Promise<{ meeting_id: number; status: string; is_connected: boolean }> {
+    return apiRequest<{ meeting_id: number; status: string; is_connected: boolean }>(`/api/zoom/status/${meetingId}`);
+  },
+
+  // Notifications (Block 5)
+  async getNotifications(unreadOnly: boolean = false): Promise<NotificationItem[]> {
+    return apiRequest<NotificationItem[]>(`/api/notifications${unreadOnly ? "?unread_only=true" : ""}`);
+  },
+
+  async markNotificationRead(notificationId: number): Promise<NotificationItem> {
+    return apiRequest<NotificationItem>(`/api/notifications/${notificationId}/read`, {
+      method: "PATCH",
+    });
+  },
+
+  async markAllNotificationsRead(): Promise<{ status: string; count: number }> {
+    return apiRequest<{ status: string; count: number }>("/api/notifications/mark-all-read", {
+      method: "POST",
+    });
   },
 
   // Simulated / Real Agent

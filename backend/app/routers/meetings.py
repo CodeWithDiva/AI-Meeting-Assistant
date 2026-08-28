@@ -156,6 +156,19 @@ async def analyze_saved_meeting(
             )
         )
 
+    # ── Create in-app notification ──────────────────────────────────
+    from app.models import Notification
+    db.add(
+        Notification(
+            user_id=user.id,
+            meeting_id=meeting_id,
+            type="summary_ready",
+            title=f"Summary Ready: {meeting.title}",
+            body=f"Generated executive summary with {len(notes.decisions)} decisions and {len(notes.action_items)} action items.",
+            read=False,
+        )
+    )
+
     db.commit()
 
     return notes

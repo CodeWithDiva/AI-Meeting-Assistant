@@ -19,6 +19,7 @@ from app.routers.auth import router as auth_router
 from app.routers.chat import router as chat_router
 from app.routers.live_transcription import router as live_transcription_router
 from app.routers.meetings import router as meetings_router
+from app.routers.notifications import router as notifications_router
 from app.routers.recording import router as recording_router
 from app.routers.search import router as search_router
 from app.routers.speakers import router as speakers_router
@@ -26,6 +27,7 @@ from app.routers.tasks import router as tasks_router
 from app.routers.transcript import router as transcript_router
 from app.routers.transcription import router as transcription_router
 from app.routers.tts import router as tts_router
+from app.routers.zoom import router as zoom_router
 from app.database import Base, engine
 import app.models  # noqa: F401
 
@@ -33,8 +35,8 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
 app = FastAPI(
     title="AI Meeting Assistant API",
-    version="0.4.0",
-    description="Backend API for the AI Meeting Assistant — v3 Live AI & Streaming.",
+    version="1.0.0",
+    description="Backend API for the AI Meeting Assistant — Complete System.",
 )
 
 app.add_middleware(
@@ -59,6 +61,8 @@ app.include_router(search_router)
 app.include_router(chat_router)
 app.include_router(live_transcription_router)
 app.include_router(tts_router)
+app.include_router(zoom_router)
+app.include_router(notifications_router)
 app.include_router(tasks_router)
 app.include_router(analysis_router)
 app.include_router(agent_router)
