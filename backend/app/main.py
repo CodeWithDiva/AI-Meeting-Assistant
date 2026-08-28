@@ -6,17 +6,37 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Any
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+from app.routers.agent import router as agent_router
+from app.routers.analysis import router as analysis_router
+from app.routers.auth import router as auth_router
+from app.routers.meetings import router as meetings_router
+from app.routers.transcription import router as transcription_router
+from app.database import Base, engine
+import app.models  # noqa: F401
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
 app = FastAPI(
     title="AI Meeting Assistant API",
     version="0.1.0",
     description="Backend API for the AI Meeting Assistant.",
 )
+
+app.include_router(transcription_router)
+app.include_router(analysis_router)
+app.include_router(agent_router)
+app.include_router(auth_router)
+app.include_router(meetings_router)
+
+Base.metadata.create_all(bind=engine)
+
+_zoom_token: str | None = None
 
 
 @app.get("/health", tags=["system"])
@@ -35,6 +55,35 @@ def _zoom_secret_token() -> str:
     return secret
 
 
+def _require_zoom_access_token() -> str:
+    if not _zoom_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Zoom is not authorized. Complete the OAuth flow first.",
+        )
+    return _zoom_token
+
+
+async def _set_rtms_status(meeting_id: int, action: str) -> dict[str, Any]:
+    client_id = os.getenv("ZOOM_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=503, detail="ZOOM_CLIENT_ID is not configured.")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.patch(
+            f"https://api.zoom.us/v2/live_meetings/{meeting_id}/rtms_app/status",
+            headers={"Authorization": f"Bearer {_require_zoom_access_token()}"},
+            json={"action": action, "settings": {"client_id": client_id}},
+        )
+
+    if response.is_error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Zoom RTMS {action} request failed: {response.text}",
+        )
+    return response.json()
+
+
 def _verify_zoom_signature(body: bytes, timestamp: str, signature: str) -> bool:
     """Verify a Zoom webhook request using its version-0 HMAC signature."""
     if not timestamp or not signature:
@@ -51,6 +100,18 @@ def _verify_zoom_signature(body: bytes, timestamp: str, signature: str) -> bool:
         _zoom_secret_token().encode(), message, hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(expected, signature)
+
+
+@app.patch("/api/integrations/zoom/rtms/start/{meeting_id}", tags=["zoom"])
+async def start_zoom_rtms(meeting_id: int) -> dict[str, Any]:
+    """Start RTMS for a meeting using the authorized Zoom account."""
+    return await _set_rtms_status(meeting_id, "start")
+
+
+@app.patch("/api/integrations/zoom/rtms/stop/{meeting_id}", tags=["zoom"])
+async def stop_zoom_rtms(meeting_id: int) -> dict[str, Any]:
+    """Stop RTMS for a meeting using the authorized Zoom account."""
+    return await _set_rtms_status(meeting_id, "stop")
 
 
 @app.post("/api/integrations/zoom/webhook", tags=["zoom"])
@@ -79,3 +140,52 @@ async def zoom_webhook(request: Request) -> dict[str, str]:
         raise HTTPException(status_code=401, detail="Invalid Zoom webhook signature.")
 
     return {"status": "accepted"}
+
+
+@app.get("/api/integrations/zoom/callback", tags=["zoom"])
+async def zoom_oauth_callback(
+    request: Request,
+    code: str | None = None,
+    error: str | None = None,
+) -> dict[str, str]:
+    """Receive the OAuth authorization result from Zoom during local testing."""
+    if error:
+        raise HTTPException(status_code=400, detail=f"Zoom authorization failed: {error}")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing Zoom authorization code.")
+
+    client_id = os.getenv("ZOOM_CLIENT_ID")
+    client_secret = os.getenv("ZOOM_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="ZOOM_CLIENT_ID and ZOOM_CLIENT_SECRET are not configured.",
+        )
+
+    redirect_uri = str(request.url).split("?", 1)[0]
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(
+            "https://zoom.us/oauth/token",
+            auth=(client_id, client_secret),
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+        )
+
+    if response.is_error:
+        raise HTTPException(
+            status_code=502,
+            detail="Zoom token exchange failed.",
+        )
+
+    global _zoom_token
+    _zoom_token = response.json().get("access_token")
+    if not _zoom_token:
+        raise HTTPException(status_code=502, detail="Zoom did not return an access token.")
+
+    return {
+        "status": "authorized",
+        "message": "Zoom authorization completed successfully.",
+    }

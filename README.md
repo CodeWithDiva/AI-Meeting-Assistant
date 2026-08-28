@@ -10,6 +10,20 @@ extract decisions, assign tasks, and answer questions during meetings.
 
 The backend foundation is mapped at `backend/app`. The platform decision is deliberately deferred until the Day 2–3 live tests are complete. See [the Day 1 feasibility report](docs/feasibility/day-01-platform-feasibility.md).
 
+### Local AI behaviour
+
+Meeting-note generation uses Ollama when it is running. If it is not installed or
+is unavailable, the API returns a safe local fallback summary, decisions, and
+action items instead of failing. The fallback only extracts information present
+in the transcript; it does not invent attendees, decisions, or deadlines.
+
+Use `POST /api/transcription/upload/{meeting_id}` with an authenticated audio
+upload to transcribe and persist the result directly on a meeting. The original
+upload endpoint remains available for standalone transcription tests.
+
+Use `POST /api/meetings/{meeting_id}/analyze` to analyze the saved transcript and
+persist the generated summary automatically.
+
 ## Planned Features
 
 - AI meeting agent
