@@ -1,30 +1,92 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useState } from "react";
-import "./advanced.css";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { authStorage } from "@/lib/api";
 
-type Meeting = { id:number; title:string; platform:string|null; transcript:string|null; summary:string|null; created_at:string|null };
-type Notes = { summary:string; decisions:string[]; action_items:{assignee:string;task:string;deadline:string|null}[] };
-const API = process.env.NEXT_PUBLIC_API_URL ?? "";
+export default function LandingPage() {
+  const router = useRouter();
+  const [mounted, setMounted] = useState(false);
 
-async function request<T>(path:string, token:string, options:RequestInit={}) : Promise<T> {
-  const response = await fetch(`${API}${path}`, { ...options, headers:{ "Content-Type":"application/json", ...(token ? {Authorization:`Bearer ${token}`} : {}), ...(options.headers ?? {}) } });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.detail ?? "Request failed");
-  return data as T;
-}
+  useEffect(() => {
+    setMounted(true);
+    if (authStorage.isLoggedIn()) {
+      router.push("/dashboard");
+    }
+  }, [router]);
 
-export default function Home() {
-  const [token,setToken] = useState(""); const [email,setEmail] = useState(""); const [password,setPassword] = useState("");
-  const [meetings,setMeetings] = useState<Meeting[]>([]); const [selected,setSelected] = useState<Meeting|null>(null);
-  const [title,setTitle] = useState(""); const [error,setError] = useState(""); const [busy,setBusy] = useState(false); const [notes,setNotes] = useState<Notes|null>(null);
-  useEffect(()=>{ const saved=window.localStorage.getItem("meeting_token"); if(saved){setToken(saved); void loadMeetings(saved);} },[]);
-  async function loadMeetings(auth=token){ try { const items=await request<Meeting[]>("/api/meetings",auth); setMeetings(items); if(items.length && !selected)setSelected(items[0]); } catch(e){setError(e instanceof Error?e.message:"Unable to load meetings");} }
-  async function auth(mode:"login"|"register"){ setError(""); setBusy(true); try { if(mode==="register") await request("/api/auth/register","",{method:"POST",body:JSON.stringify({email,password})}); const result=await request<{access_token:string}>("/api/auth/login","",{method:"POST",body:JSON.stringify({email,password})}); window.localStorage.setItem("meeting_token",result.access_token); setToken(result.access_token); await loadMeetings(result.access_token); } catch(e){setError(e instanceof Error?e.message:"Authentication failed");} finally{setBusy(false);} }
-  async function createMeeting(e:FormEvent){e.preventDefault(); if(!title.trim())return; setBusy(true); try{const m=await request<Meeting>("/api/meetings",token,{method:"POST",body:JSON.stringify({title,platform:"zoom"})});setMeetings([m,...meetings]);setSelected(m);setTitle("");}catch(e){setError(e instanceof Error?e.message:"Could not create meeting");}finally{setBusy(false);}}
-  async function upload(e:ChangeEvent<HTMLInputElement>){const file=e.target.files?.[0];if(!file||!selected)return;setBusy(true);try{const response=await fetch(`${API}/api/transcription/upload/${selected.id}`,{method:"POST",headers:{Authorization:`Bearer ${token}`},body:(()=>{const f=new FormData();f.append("file",file);return f;})()});const data=await response.json();if(!response.ok)throw new Error(data.detail??"Upload failed");const updated={...selected,transcript:data.transcript};setSelected(updated);setMeetings(meetings.map(m=>m.id===updated.id?updated:m));}catch(e){setError(e instanceof Error?e.message:"Upload failed");}finally{setBusy(false);e.target.value="";}}
-  async function analyze(){if(!selected)return;setBusy(true);try{const data=await request<Notes>(`/api/meetings/${selected.id}/analyze`,token,{method:"POST"});const updated={...selected,summary:data.summary};setSelected(updated);setMeetings(meetings.map(m=>m.id===updated.id?updated:m));setNotes(data);}catch(e){setError(e instanceof Error?e.message:"Analysis failed");}finally{setBusy(false);}}
-  function logout(){localStorage.removeItem("meeting_token");setToken("");setMeetings([]);setSelected(null);}
-  if(!token)return <main className="shell"><div className="panel" style={{maxWidth:440,margin:"10vh auto"}}><h1>AI Meeting Assistant</h1><p className="muted">Turn meeting audio into searchable notes and action items.</p><div className="stack"><label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Minimum 8 characters"/></label><div className="row"><button disabled={busy} onClick={()=>void auth("login")}>Log in</button><button className="secondary" disabled={busy} onClick={()=>void auth("register")}>Create account</button></div>{error&&<p className="error">{error}</p>}</div></div></main>;
-  return <main className="shell"><header className="topbar"><div><div className="brand">AI Meeting Assistant</div><span className="muted">Your meeting workspace</span></div><button className="secondary" onClick={logout}>Log out</button></header><div className="grid"><aside className="panel"><h2>Meetings</h2><p className="muted">{meetings.length} saved meeting{meetings.length===1?"":"s"}</p><form className="row" onSubmit={createMeeting}><input value={title} onChange={e=>setTitle(e.target.value)} placeholder="New meeting title"/><button disabled={busy}>Add</button></form><div className="stack" style={{marginTop:16}}>{meetings.map(m=><button key={m.id} className={`meeting ${selected?.id===m.id?"active":""}`} onClick={()=>{setSelected(m);setNotes(null)}}><strong>{m.title}</strong><br/><span className="muted">{m.platform??"Meeting"} · {m.transcript?"Transcript ready":"No transcript"}</span></button>)}</div>{meetings.length===0&&<div className="empty">Create your first meeting.</div>}</aside><section className="panel">{!selected?<div className="empty"><div className="stat">+</div><h2>Select a meeting</h2></div>:<><div className="row" style={{justifyContent:"space-between"}}><div><h1>{selected.title}</h1><span className="badge">{selected.transcript?"Transcript ready":"Awaiting audio"}</span></div><label className="upload-button">Upload audio<input hidden type="file" accept="audio/*" onChange={upload}/></label></div><hr style={{borderColor:"var(--line)",margin:"22px 0"}}/><h3>Transcript</h3><div className="result">{selected.transcript??"Upload an audio file to generate a transcript."}</div><div className="row" style={{marginTop:14}}><button disabled={busy||!selected.transcript} onClick={()=>void analyze()}>Analyze with AI</button>{selected.summary&&<span className="badge">Summary saved</span>}</div>{(notes||selected.summary)&&<div style={{marginTop:24}}><h3>Summary</h3><div className="result">{notes?.summary??selected.summary}</div>{notes&&<><h3 style={{marginTop:18}}>Decisions</h3><div className="result">{notes.decisions.length?notes.decisions.join("\n"):"No decisions detected."}</div><h3 style={{marginTop:18}}>Action items</h3><div className="result">{notes.action_items.length?notes.action_items.map(a=>`${a.assignee}: ${a.task}${a.deadline?` (by ${a.deadline})`:""}`).join("\n"):"No action items detected."}</div></>}</div>}{error&&<p className="error">{error}</p>}</>}</section></div></main>;
+  if (!mounted) return null;
+
+  return (
+    <div className="app-container">
+      {/* Hero */}
+      <section style={{ textAlign: "center", padding: "60px 20px 70px" }}>
+        <h1
+          style={{
+            fontSize: "clamp(32px, 5vw, 52px)",
+            lineHeight: 1.15,
+            marginBottom: 18,
+            maxWidth: 800,
+            margin: "0 auto 18px",
+            fontWeight: 600,
+          }}
+        >
+          Automated meeting notes and structured action items.
+        </h1>
+
+        <p
+          style={{
+            fontSize: "clamp(15px, 2vw, 18px)",
+            color: "var(--text-secondary)",
+            maxWidth: 600,
+            margin: "0 auto 32px",
+            lineHeight: 1.6,
+          }}
+        >
+          Fast local speech-to-text transcription, automated executive summaries, decision tracking, and task management.
+        </p>
+
+        <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
+          <Link href="/login" className="btn btn-primary" style={{ padding: "10px 22px" }}>
+            Open Workspace
+          </Link>
+          <Link href="/login" className="btn btn-secondary" style={{ padding: "10px 22px" }}>
+            Sign In
+          </Link>
+        </div>
+      </section>
+
+      {/* Feature Grid */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+          gap: 16,
+          marginBottom: 60,
+        }}
+      >
+        <div className="glass-panel">
+          <h3 style={{ fontSize: 16, marginBottom: 6 }}>Transcription</h3>
+          <p style={{ color: "var(--text-secondary)", fontSize: 13, lineHeight: 1.6 }}>
+            Accurate speech-to-text with start and end timestamps, formatted cleanly per segment.
+          </p>
+        </div>
+
+        <div className="glass-panel">
+          <h3 style={{ fontSize: 16, marginBottom: 6 }}>Structured Analysis</h3>
+          <p style={{ color: "var(--text-secondary)", fontSize: 13, lineHeight: 1.6 }}>
+            Automated extraction of executive summaries, key decisions, and discussion highlights.
+          </p>
+        </div>
+
+        <div className="glass-panel">
+          <h3 style={{ fontSize: 16, marginBottom: 6 }}>Action Items</h3>
+          <p style={{ color: "var(--text-secondary)", fontSize: 13, lineHeight: 1.6 }}>
+            Assignees and deadlines extracted directly into an interactive task tracker.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
 }

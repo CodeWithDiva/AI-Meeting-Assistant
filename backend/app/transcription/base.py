@@ -1,12 +1,34 @@
-"""Provider contract for upload and live transcription sources."""
+"""Provider contract and faster-whisper implementation for transcription.
 
-from pathlib import Path
+v3: Returns individual segments with timestamps instead of just flat text.
+"""
+
 import os
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
 
+@dataclass
+class TranscriptSegment:
+    """One piece of transcribed audio with timing info."""
+
+    text: str
+    start: float = 0.0
+    end: float = 0.0
+    speaker_label: str | None = None
+
+
+@dataclass
+class TranscriptResult:
+    """Complete transcription output."""
+
+    full_text: str
+    segments: list[TranscriptSegment] = field(default_factory=list)
+
+
 class TranscriptionService(Protocol):
-    async def transcribe(self, audio_path: Path) -> str:
+    async def transcribe(self, audio_path: Path) -> TranscriptResult:
         """Return a transcript for an audio file."""
 
 
@@ -35,7 +57,21 @@ class FasterWhisperService:
             )
         return self._model
 
-    async def transcribe(self, audio_path: Path) -> str:
+    async def transcribe(self, audio_path: Path) -> TranscriptResult:
         model = self._load_model()
-        segments, _ = model.transcribe(str(audio_path), vad_filter=True)
-        return " ".join(segment.text.strip() for segment in segments).strip()
+        raw_segments, _ = model.transcribe(str(audio_path), vad_filter=True)
+
+        segments: list[TranscriptSegment] = []
+        texts: list[str] = []
+        for seg in raw_segments:
+            text = seg.text.strip()
+            if text:
+                segments.append(
+                    TranscriptSegment(text=text, start=seg.start, end=seg.end)
+                )
+                texts.append(text)
+
+        return TranscriptResult(
+            full_text=" ".join(texts),
+            segments=segments,
+        )

@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class ActionItem(BaseModel):
     assignee: str = "Unassigned"
+    assigned_by: str | None = None
     task: str
     deadline: str | None = None
 

@@ -16,8 +16,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routers.agent import router as agent_router
 from app.routers.analysis import router as analysis_router
 from app.routers.auth import router as auth_router
+from app.routers.chat import router as chat_router
+from app.routers.live_transcription import router as live_transcription_router
 from app.routers.meetings import router as meetings_router
+from app.routers.recording import router as recording_router
+from app.routers.search import router as search_router
+from app.routers.speakers import router as speakers_router
+from app.routers.tasks import router as tasks_router
+from app.routers.transcript import router as transcript_router
 from app.routers.transcription import router as transcription_router
+from app.routers.tts import router as tts_router
 from app.database import Base, engine
 import app.models  # noqa: F401
 
@@ -25,8 +33,8 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
 app = FastAPI(
     title="AI Meeting Assistant API",
-    version="0.1.0",
-    description="Backend API for the AI Meeting Assistant.",
+    version="0.4.0",
+    description="Backend API for the AI Meeting Assistant — v3 Live AI & Streaming.",
 )
 
 app.add_middleware(
@@ -41,11 +49,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(transcription_router)
-app.include_router(analysis_router)
-app.include_router(agent_router)
 app.include_router(auth_router)
 app.include_router(meetings_router)
+app.include_router(recording_router)
+app.include_router(transcription_router)
+app.include_router(transcript_router)
+app.include_router(speakers_router)
+app.include_router(search_router)
+app.include_router(chat_router)
+app.include_router(live_transcription_router)
+app.include_router(tts_router)
+app.include_router(tasks_router)
+app.include_router(analysis_router)
+app.include_router(agent_router)
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    import logging
+    from fastapi.responses import JSONResponse
+    logging.exception("Unhandled error on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Server error: {str(exc)}"},
+    )
 
 Base.metadata.create_all(bind=engine)
 
