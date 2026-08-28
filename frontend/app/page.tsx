@@ -1,10 +1,11 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useState } from "react";
+import "./advanced.css";
 
 type Meeting = { id:number; title:string; platform:string|null; transcript:string|null; summary:string|null; created_at:string|null };
 type Notes = { summary:string; decisions:string[]; action_items:{assignee:string;task:string;deadline:string|null}[] };
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8003";
+const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 async function request<T>(path:string, token:string, options:RequestInit={}) : Promise<T> {
   const response = await fetch(`${API}${path}`, { ...options, headers:{ "Content-Type":"application/json", ...(token ? {Authorization:`Bearer ${token}`} : {}), ...(options.headers ?? {}) } });

@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers.agent import router as agent_router
 from app.routers.analysis import router as analysis_router
@@ -26,6 +27,18 @@ app = FastAPI(
     title="AI Meeting Assistant API",
     version="0.1.0",
     description="Backend API for the AI Meeting Assistant.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://172.31.80.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(transcription_router)
