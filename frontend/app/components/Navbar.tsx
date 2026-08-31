@@ -63,8 +63,8 @@ export default function Navbar() {
       <header className="navbar">
         <div className="app-container navbar-inner">
           <Link href="/" className="brand-logo">
-            <div className="brand-icon">M</div>
-            <span>Meeting Assistant</span>
+            <div className="brand-icon">⚡</div>
+            <span>AI Meeting Assistant</span>
           </Link>
         </div>
       </header>
@@ -76,10 +76,37 @@ export default function Navbar() {
   return (
     <header className="navbar">
       <div className="app-container navbar-inner">
-        <Link href="/" className="brand-logo">
-          <div className="brand-icon">M</div>
-          <span>Meeting Assistant</span>
-        </Link>
+        <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
+          <Link href="/" className="brand-logo">
+            <div className="brand-icon">⚡</div>
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <span style={{ fontSize: 16, fontWeight: 800, letterSpacing: "-0.02em" }}>AI Meeting Assistant</span>
+              <span style={{ fontSize: 10, color: "var(--accent-indigo)", fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                Autonomous Copilot v3
+              </span>
+            </div>
+          </Link>
+
+          {isAuth && (
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "3px 10px",
+                borderRadius: "var(--radius-full)",
+                background: "rgba(16, 185, 129, 0.08)",
+                border: "1px solid rgba(16, 185, 129, 0.25)",
+                fontSize: 11,
+                color: "#6ee7b7",
+                fontWeight: 500,
+              }}
+            >
+              <span className="status-dot status-dot-active" />
+              <span>Whisper & LLM Online</span>
+            </div>
+          )}
+        </div>
 
         <nav className="nav-links">
           {isAuth ? (
@@ -88,13 +115,15 @@ export default function Navbar() {
                 href="/dashboard"
                 className={`nav-link ${pathname === "/dashboard" ? "active" : ""}`}
               >
-                Dashboard
+                <span>📊</span>
+                <span>Dashboard</span>
               </Link>
               <Link
                 href="/meetings"
                 className={`nav-link ${pathname.startsWith("/meetings") ? "active" : ""}`}
               >
-                Meetings
+                <span>🎙️</span>
+                <span>Meetings</span>
               </Link>
 
               {/* Notifications Dropdown */}
@@ -108,23 +137,25 @@ export default function Navbar() {
                     alignItems: "center",
                     gap: 6,
                     position: "relative",
-                    background: "transparent",
-                    border: "none",
+                    background: "rgba(255, 255, 255, 0.04)",
+                    border: "1px solid var(--border-subtle)",
                     cursor: "pointer",
+                    padding: "7px 12px",
                   }}
                   title="Notifications"
                 >
-                  <span>🔔</span>
+                  <span style={{ fontSize: 14 }}>🔔</span>
                   {unreadCount > 0 && (
                     <span
                       style={{
-                        background: "var(--accent-primary)",
+                        background: "var(--accent-rose)",
                         color: "#fff",
                         fontSize: 10,
-                        fontWeight: 600,
-                        padding: "1px 5px",
-                        borderRadius: 10,
+                        fontWeight: 700,
+                        padding: "1px 6px",
+                        borderRadius: "10px",
                         lineHeight: 1.2,
+                        boxShadow: "0 0 10px rgba(244, 63, 94, 0.6)",
                       }}
                     >
                       {unreadCount}
@@ -137,14 +168,15 @@ export default function Navbar() {
                     style={{
                       position: "absolute",
                       right: 0,
-                      top: "calc(100% + 8px)",
-                      width: 320,
-                      background: "var(--bg-card)",
+                      top: "calc(100% + 10px)",
+                      width: 340,
+                      background: "var(--bg-surface)",
                       border: "1px solid var(--border-card)",
-                      borderRadius: "var(--radius-sm)",
-                      boxShadow: "var(--shadow-panel)",
+                      borderRadius: "var(--radius-md)",
+                      boxShadow: "var(--shadow-lg), 0 0 30px rgba(0,0,0,0.6)",
                       zIndex: 100,
-                      padding: 12,
+                      padding: 16,
+                      animation: "scaleUp 0.15s ease",
                     }}
                   >
                     <div
@@ -152,20 +184,23 @@ export default function Navbar() {
                         display: "flex",
                         justifyContent: "space-between",
                         alignItems: "center",
-                        paddingBottom: 8,
+                        paddingBottom: 10,
                         borderBottom: "1px solid var(--border-subtle)",
-                        marginBottom: 8,
+                        marginBottom: 10,
                       }}
                     >
-                      <span style={{ fontSize: 13, fontWeight: 600 }}>Notifications</span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
+                        Notifications ({notifications.length})
+                      </span>
                       {unreadCount > 0 && (
                         <button
                           onClick={handleMarkAllRead}
                           style={{
                             background: "none",
                             border: "none",
-                            color: "var(--accent-blue)",
+                            color: "var(--accent-indigo)",
                             fontSize: 11,
+                            fontWeight: 600,
                             cursor: "pointer",
                           }}
                         >
@@ -174,9 +209,9 @@ export default function Navbar() {
                       )}
                     </div>
 
-                    <div style={{ maxHeight: 280, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ maxHeight: 300, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
                       {notifications.length === 0 ? (
-                        <div style={{ textAlign: "center", padding: "20px 0", fontSize: 12, color: "var(--text-muted)" }}>
+                        <div style={{ textAlign: "center", padding: "28px 0", fontSize: 13, color: "var(--text-muted)" }}>
                           No notifications yet.
                         </div>
                       ) : (
@@ -185,17 +220,19 @@ export default function Navbar() {
                             key={n.id}
                             onClick={() => handleNotificationClick(n)}
                             style={{
-                              padding: "8px 10px",
+                              padding: "10px 12px",
                               borderRadius: "var(--radius-sm)",
-                              background: n.read ? "transparent" : "var(--bg-input)",
-                              border: n.read ? "1px solid transparent" : "1px solid var(--border-subtle)",
+                              background: n.read ? "transparent" : "rgba(99, 102, 241, 0.08)",
+                              border: n.read ? "1px solid rgba(255, 255, 255, 0.04)" : "1px solid rgba(99, 102, 241, 0.25)",
                               cursor: "pointer",
-                              fontSize: 12,
+                              transition: "all 0.15s ease",
                             }}
                           >
-                            <div style={{ fontWeight: n.read ? 400 : 600, marginBottom: 2 }}>{n.title}</div>
+                            <div style={{ fontWeight: n.read ? 500 : 700, fontSize: 13, marginBottom: 2, color: n.read ? "var(--text-secondary)" : "#ffffff" }}>
+                              {n.title}
+                            </div>
                             {n.body && (
-                              <div style={{ color: "var(--text-muted)", fontSize: 11, lineHeight: 1.4 }}>
+                              <div style={{ color: "var(--text-muted)", fontSize: 12, lineHeight: 1.4 }}>
                                 {n.body}
                               </div>
                             )}
@@ -210,7 +247,7 @@ export default function Navbar() {
               <button
                 onClick={handleLogout}
                 className="btn btn-secondary btn-sm"
-                style={{ padding: "6px 12px", fontSize: 13 }}
+                style={{ padding: "7px 14px" }}
               >
                 Sign out
               </button>

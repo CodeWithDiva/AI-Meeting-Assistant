@@ -30,6 +30,8 @@ from app.routers.tts import router as tts_router
 from app.routers.zoom import router as zoom_router
 from app.database import Base, engine
 import app.models  # noqa: F401
+from app.integrations.zoom_rtms import router as zoom_router
+app.include_router(zoom_router, prefix="/api/integrations/zoom", tags=["zoom"])
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 

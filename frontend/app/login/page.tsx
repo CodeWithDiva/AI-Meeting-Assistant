@@ -32,7 +32,7 @@ export default function LoginPage() {
     try {
       if (mode === "register") {
         await api.register(email, password);
-        setSuccessMsg("Account created. Signing in...");
+        setSuccessMsg("Account created successfully. Authenticating...");
       }
       await api.login(email, password);
       router.push("/dashboard");
@@ -49,7 +49,7 @@ export default function LoginPage() {
         display: "flex",
         justifyContent: "center",
         alignItems: "center",
-        minHeight: "calc(100vh - 160px)",
+        minHeight: "calc(100vh - 180px)",
         padding: "20px",
       }}
     >
@@ -57,20 +57,38 @@ export default function LoginPage() {
         className="glass-panel"
         style={{
           width: "100%",
-          maxWidth: 400,
-          padding: "32px 28px",
+          maxWidth: 420,
+          padding: "36px 32px",
           margin: "0 auto",
+          border: "1px solid var(--border-card-hover)",
+          boxShadow: "var(--shadow-lg), 0 0 40px rgba(99, 102, 241, 0.15)",
         }}
       >
         {/* Header */}
-        <div style={{ textAlign: "center", marginBottom: 24 }}>
-          <h2 style={{ fontSize: 20, marginBottom: 4 }}>
-            {mode === "login" ? "Sign In" : "Create Account"}
+        <div style={{ textAlign: "center", marginBottom: 26 }}>
+          <div
+            style={{
+              width: 44,
+              height: 44,
+              background: "var(--accent-gradient)",
+              borderRadius: "var(--radius-sm)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 20,
+              margin: "0 auto 14px",
+              boxShadow: "0 0 20px rgba(99, 102, 241, 0.4)",
+            }}
+          >
+            ⚡
+          </div>
+          <h2 style={{ fontSize: 22, marginBottom: 6, color: "#ffffff" }}>
+            {mode === "login" ? "Welcome Back" : "Create Workspace"}
           </h2>
           <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
             {mode === "login"
-              ? "Access your meeting workspaces and notes"
-              : "Set up your workspace in seconds"}
+              ? "Sign in to access your meeting transcripts and tasks"
+              : "Set up your autonomous meeting intelligence workspace"}
           </p>
         </div>
 
@@ -81,18 +99,20 @@ export default function LoginPage() {
             gridTemplateColumns: "1fr 1fr",
             gap: 4,
             background: "var(--bg-input)",
-            padding: 3,
+            padding: 4,
             borderRadius: "var(--radius-sm)",
-            marginBottom: 20,
+            marginBottom: 24,
+            border: "1px solid var(--border-subtle)",
           }}
         >
           <button
             type="button"
             className="btn btn-sm"
             style={{
-              background: mode === "login" ? "var(--bg-card)" : "transparent",
-              color: mode === "login" ? "var(--text-primary)" : "var(--text-secondary)",
-              border: mode === "login" ? "1px solid var(--border-subtle)" : "1px solid transparent",
+              background: mode === "login" ? "rgba(99, 102, 241, 0.2)" : "transparent",
+              color: mode === "login" ? "#ffffff" : "var(--text-secondary)",
+              border: mode === "login" ? "1px solid rgba(99, 102, 241, 0.4)" : "1px solid transparent",
+              fontWeight: mode === "login" ? 700 : 500,
             }}
             onClick={() => {
               setMode("login");
@@ -106,9 +126,10 @@ export default function LoginPage() {
             type="button"
             className="btn btn-sm"
             style={{
-              background: mode === "register" ? "var(--bg-card)" : "transparent",
-              color: mode === "register" ? "var(--text-primary)" : "var(--text-secondary)",
-              border: mode === "register" ? "1px solid var(--border-subtle)" : "1px solid transparent",
+              background: mode === "register" ? "rgba(99, 102, 241, 0.2)" : "transparent",
+              color: mode === "register" ? "#ffffff" : "var(--text-secondary)",
+              border: mode === "register" ? "1px solid rgba(99, 102, 241, 0.4)" : "1px solid transparent",
+              fontWeight: mode === "register" ? 700 : 500,
             }}
             onClick={() => {
               setMode("register");
@@ -127,7 +148,7 @@ export default function LoginPage() {
         {/* Form */}
         <form onSubmit={handleSubmit}>
           <div className="form-group">
-            <label className="form-label">Email</label>
+            <label className="form-label">Work Email</label>
             <input
               type="email"
               className="form-input"
@@ -138,7 +159,7 @@ export default function LoginPage() {
             />
           </div>
 
-          <div className="form-group" style={{ marginBottom: 20 }}>
+          <div className="form-group" style={{ marginBottom: 24 }}>
             <label className="form-label">Password</label>
             <input
               type="password"
@@ -153,18 +174,18 @@ export default function LoginPage() {
           <button
             type="submit"
             className="btn btn-primary"
-            style={{ width: "100%", padding: "10px", marginBottom: 14 }}
+            style={{ width: "100%", padding: "12px", marginBottom: 16 }}
             disabled={loading}
           >
             {loading ? (
               <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span className="spinner"></span>
+                <span className="spinner" />
                 <span>{mode === "login" ? "Signing In..." : "Creating Account..."}</span>
               </span>
             ) : mode === "login" ? (
-              "Sign In"
+              "Sign In to Workspace"
             ) : (
-              "Create Account"
+              "Create Workspace Account"
             )}
           </button>
         </form>
@@ -172,7 +193,7 @@ export default function LoginPage() {
         <div style={{ textAlign: "center", fontSize: 13, color: "var(--text-secondary)" }}>
           {mode === "login" ? (
             <span>
-              New user?{" "}
+              Don&apos;t have an account?{" "}
               <button
                 type="button"
                 onClick={() => {
@@ -182,8 +203,8 @@ export default function LoginPage() {
                 style={{
                   background: "transparent",
                   border: "none",
-                  color: "var(--accent-blue)",
-                  fontWeight: 500,
+                  color: "var(--accent-indigo)",
+                  fontWeight: 600,
                   cursor: "pointer",
                   padding: 0,
                 }}
@@ -193,7 +214,7 @@ export default function LoginPage() {
             </span>
           ) : (
             <span>
-              Already registered?{" "}
+              Already have an account?{" "}
               <button
                 type="button"
                 onClick={() => {
@@ -203,8 +224,8 @@ export default function LoginPage() {
                 style={{
                   background: "transparent",
                   border: "none",
-                  color: "var(--accent-blue)",
-                  fontWeight: 500,
+                  color: "var(--accent-indigo)",
+                  fontWeight: 600,
                   cursor: "pointer",
                   padding: 0,
                 }}

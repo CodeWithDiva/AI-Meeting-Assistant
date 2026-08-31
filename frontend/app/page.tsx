@@ -20,70 +20,80 @@ export default function LandingPage() {
 
   return (
     <div className="app-container">
-      {/* Hero */}
-      <section style={{ textAlign: "center", padding: "60px 20px 70px" }}>
+      {/* Hero Section */}
+      <section style={{ textAlign: "center", padding: "80px 20px 80px" }}>
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 20 }}>
+          <span className="badge badge-indigo">ENTERPRISE MEETING INTELLIGENCE</span>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>•</span>
+          <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Faster-Whisper + Autonomous Agent v3</span>
+        </div>
+
         <h1
           style={{
-            fontSize: "clamp(32px, 5vw, 52px)",
+            fontSize: "clamp(34px, 5.5vw, 58px)",
             lineHeight: 1.15,
-            marginBottom: 18,
-            maxWidth: 800,
-            margin: "0 auto 18px",
-            fontWeight: 600,
+            marginBottom: 22,
+            maxWidth: 860,
+            margin: "0 auto 22px",
+            fontWeight: 800,
+            letterSpacing: "-0.04em",
           }}
         >
-          Automated meeting notes and structured action items.
+          Automated meeting transcripts, executive notes, and assigned tasks.
         </h1>
 
         <p
           style={{
-            fontSize: "clamp(15px, 2vw, 18px)",
+            fontSize: "clamp(16px, 2vw, 19px)",
             color: "var(--text-secondary)",
-            maxWidth: 600,
-            margin: "0 auto 32px",
+            maxWidth: 680,
+            margin: "0 auto 36px",
             lineHeight: 1.6,
           }}
         >
-          Fast local speech-to-text transcription, automated executive summaries, decision tracking, and task management.
+          Autonomous meeting copilot that connects to your Zoom & Google Meet sessions, records live speech, identifies speakers, extracts key decisions, and assigns action items directly to your team.
         </p>
 
-        <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
-          <Link href="/login" className="btn btn-primary" style={{ padding: "10px 22px" }}>
-            Open Workspace
+        <div style={{ display: "flex", gap: 14, justifyContent: "center", flexWrap: "wrap" }}>
+          <Link href="/login" className="btn btn-primary btn-lg">
+            <span>⚡ Open Workspace</span>
           </Link>
-          <Link href="/login" className="btn btn-secondary" style={{ padding: "10px 22px" }}>
-            Sign In
+          <Link href="/login" className="btn btn-secondary btn-lg">
+            <span>Sign In →</span>
           </Link>
         </div>
       </section>
 
-      {/* Feature Grid */}
+      {/* Feature Showcase Grid */}
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-          gap: 16,
-          marginBottom: 60,
+          gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+          gap: 20,
+          marginBottom: 70,
         }}
       >
         <div className="glass-panel">
-          <h3 style={{ fontSize: 16, marginBottom: 6 }}>Transcription</h3>
-          <p style={{ color: "var(--text-secondary)", fontSize: 13, lineHeight: 1.6 }}>
-            Accurate speech-to-text with start and end timestamps, formatted cleanly per segment.
+          <div style={{ fontSize: 28, marginBottom: 14 }}>🎙️</div>
+          <h3 style={{ fontSize: 18, marginBottom: 8, color: "#fff" }}>Real-Time Transcription</h3>
+          <p style={{ color: "var(--text-secondary)", fontSize: 14, lineHeight: 1.6 }}>
+            Accurate speech-to-text with millisecond timestamps and speaker identification powered by faster-whisper.
           </p>
         </div>
 
         <div className="glass-panel">
-          <h3 style={{ fontSize: 16, marginBottom: 6 }}>Structured Analysis</h3>
-          <p style={{ color: "var(--text-secondary)", fontSize: 13, lineHeight: 1.6 }}>
-            Automated extraction of executive summaries, key decisions, and discussion highlights.
+          <div style={{ fontSize: 28, marginBottom: 14 }}>⚡</div>
+          <h3 style={{ fontSize: 18, marginBottom: 8, color: "#fff" }}>Structured AI Analysis</h3>
+          <p style={{ color: "var(--text-secondary)", fontSize: 14, lineHeight: 1.6 }}>
+            Automated synthesis of executive summaries, approved conclusions, and key discussion highlights.
           </p>
         </div>
 
         <div className="glass-panel">
-          <h3 style={{ fontSize: 16, marginBottom: 6 }}>Action Items</h3>
-          <p style={{ color: "var(--text-secondary)", fontSize: 13, lineHeight: 1.6 }}>
-            Assignees and deadlines extracted directly into an interactive task tracker.
+          <div style={{ fontSize: 28, marginBottom: 14 }}>🎯</div>
+          <h3 style={{ fontSize: 18, marginBottom: 8, color: "#fff" }}>Autonomous Task Assignment</h3>
+          <p style={{ color: "var(--text-secondary)", fontSize: 14, lineHeight: 1.6 }}>
+            Automatically extract assignees, assigners, tasks, and deadlines into an interactive action-item board.
           </p>
         </div>
       </div>

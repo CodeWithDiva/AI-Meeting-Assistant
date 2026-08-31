@@ -8,13 +8,11 @@ import {
   ActionItem,
   api,
   authStorage,
-  ChatAnswer,
   Decision,
   MeetingDetail,
   Recording,
   Segment,
   Speaker,
-  Summary,
 } from "@/lib/api";
 
 export default function MeetingDetailPage() {
@@ -47,7 +45,7 @@ export default function MeetingDetailPage() {
   const [editSpeakerName, setEditSpeakerName] = useState("");
   const [updatingSpeaker, setUpdatingSpeaker] = useState(false);
 
-  // AI Meeting Chat state (Block 2) + TTS (Block 3)
+  // AI Meeting Chat state + TTS
   const [chatMessages, setChatMessages] = useState<{ sender: "user" | "ai"; text: string; sources?: string[] }[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
@@ -99,7 +97,7 @@ export default function MeetingDetailPage() {
 
     try {
       const result = await api.uploadAudio(meetingId, file);
-      setSuccess(`Audio transcribed successfully (${result.segment_count || 0} segments).`);
+      setSuccess(`Audio transcribed successfully (${result.segment_count || 0} segments extracted).`);
       const [detail, speakersData] = await Promise.all([
         api.getMeeting(meetingId),
         api.getSpeakers(meetingId),
@@ -117,7 +115,7 @@ export default function MeetingDetailPage() {
 
   async function handleAnalyze() {
     if (!meeting?.transcript) {
-      setError("Please upload an audio file or transcript first.");
+      setError("Please upload an audio file or record live speech first.");
       return;
     }
 
@@ -127,12 +125,12 @@ export default function MeetingDetailPage() {
 
     try {
       await api.analyzeMeeting(meetingId);
-      setSuccess("Analysis complete. Summary, decisions, and action items updated.");
+      setSuccess("Analysis complete! Summary, key decisions, and action items updated.");
       const detail = await api.getMeeting(meetingId);
       setMeeting(detail);
       setActiveTab("summary");
     } catch (err: any) {
-      setError(err?.message || "Analysis failed.");
+      setError(err?.message || "AI Analysis failed.");
     } finally {
       setAnalyzing(false);
     }
@@ -146,8 +144,8 @@ export default function MeetingDetailPage() {
       setRecording(updated);
       setSuccess(
         newEnabled
-          ? "Recording enabled with consent tracking."
-          : "Recording disabled."
+          ? "Recording enabled with attendee consent tracking."
+          : "Recording disabled (live transcript only, no audio saved)."
       );
     } catch (err: any) {
       setError(err?.message || "Failed to update recording settings");
@@ -166,7 +164,7 @@ export default function MeetingDetailPage() {
       setSpeakers(speakers.map((s) => (s.id === speakerId ? updated : s)));
       setEditingSpeakerId(null);
       setEditSpeakerName("");
-      setSuccess(`Speaker renamed to "${updated.display_name}".`);
+      setSuccess(`Speaker identified as "${updated.display_name}".`);
     } catch (err: any) {
       setError(err?.message || "Failed to rename speaker");
     } finally {
@@ -192,20 +190,18 @@ export default function MeetingDetailPage() {
     } catch (err: any) {
       setChatMessages((prev) => [
         ...prev,
-        { sender: "ai", text: "Sorry, I encountered an issue retrieving the answer. Please try again." },
+        { sender: "ai", text: "I encountered an issue retrieving the answer from the transcript. Please try again." },
       ]);
     } finally {
       setChatLoading(false);
     }
   }
 
-  // Block 3: Speak AI answer aloud with TTS
   async function handleSpeakText(text: string) {
     if (playingTTS) return;
     setPlayingTTS(true);
 
     try {
-      // 1. Try browser SpeechSynthesis for instant natural voice
       if ("speechSynthesis" in window) {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
@@ -216,7 +212,6 @@ export default function MeetingDetailPage() {
         return;
       }
 
-      // 2. Fallback to server TTS synthesis
       const res = await api.speakText(meetingId, text);
       if (res.audio_base64) {
         const audio = new Audio(`data:${res.content_type};base64,${res.audio_base64}`);
@@ -231,7 +226,6 @@ export default function MeetingDetailPage() {
     }
   }
 
-  // Block 3: Live mic segment callback
   function handleLiveSegment(newSeg: Segment) {
     if (!meeting) return;
     const updatedSegments = [...(meeting.segments || []), newSeg];
@@ -301,7 +295,7 @@ export default function MeetingDetailPage() {
       setNewTaskText("");
       setNewTaskAssignee("");
       setNewTaskDeadline("");
-      setSuccess("Action item added.");
+      setSuccess("Action item assigned and tracked.");
     } catch (err: any) {
       setError(err?.message || "Failed to create task");
     } finally {
@@ -316,11 +310,11 @@ export default function MeetingDetailPage() {
       if (agentState === "idle" || agentState === "stopped") {
         await api.startAgent(meetingId, "simulated");
         setAgentState("listening");
-        setSuccess("AI Agent connected to meeting.");
+        setSuccess("AI Assistant Agent connected to meeting stream.");
       } else {
         await api.stopAgent();
         setAgentState("stopped");
-        setSuccess("AI Agent disconnected.");
+        setSuccess("AI Assistant Agent disconnected.");
       }
     } catch (err: any) {
       setError(err?.message || "Failed to update agent state");
@@ -343,9 +337,9 @@ export default function MeetingDetailPage() {
 
   if (loading) {
     return (
-      <div className="app-container" style={{ textAlign: "center", padding: "100px 0" }}>
-        <div className="spinner" style={{ margin: "0 auto 16px" }}></div>
-        <p style={{ color: "var(--text-secondary)", fontSize: 14 }}>Loading meeting details...</p>
+      <div className="app-container" style={{ textAlign: "center", padding: "120px 0" }}>
+        <div className="spinner" style={{ margin: "0 auto 16px", width: 28, height: 28, borderWidth: 3 }}></div>
+        <p style={{ color: "var(--text-secondary)", fontSize: 14 }}>Loading meeting workspace...</p>
       </div>
     );
   }
@@ -367,57 +361,75 @@ export default function MeetingDetailPage() {
 
   return (
     <div className="app-container">
-      {/* Breadcrumb */}
-      <div style={{ marginBottom: 14 }}>
-        <Link href="/meetings" style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-          ← Meetings
+      {/* Breadcrumb Navigation */}
+      <div style={{ marginBottom: 16 }}>
+        <Link
+          href="/meetings"
+          style={{
+            fontSize: 13,
+            color: "var(--text-secondary)",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            fontWeight: 500,
+          }}
+        >
+          <span>←</span>
+          <span>Back to Workspaces</span>
         </Link>
       </div>
 
-      {/* Header Panel */}
+      {/* Header Control Panel */}
       <div
         className="glass-panel"
         style={{
-          marginBottom: 16,
+          marginBottom: 20,
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
           flexWrap: "wrap",
-          gap: 16,
-          padding: "20px 24px",
+          gap: 20,
+          padding: "24px 28px",
+          borderLeft: "4px solid var(--accent-indigo)",
         }}
       >
         <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
-            <h1 style={{ fontSize: 20 }}>{meeting.title}</h1>
-            <span className="badge badge-indigo">{meeting.platform || "Direct"}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+            <h1 style={{ fontSize: 22, color: "#ffffff" }}>{meeting.title}</h1>
+            <span className="badge badge-cyan">{meeting.platform || "Direct Audio"}</span>
             {meeting.transcript && <span className="badge badge-emerald">Transcribed</span>}
           </div>
-          <p style={{ color: "var(--text-muted)", fontSize: 12 }}>
-            Created: {meeting.created_at ? new Date(meeting.created_at).toLocaleString() : "Recently"}
+          <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
+            Session ID: #{meeting.id} • Created:{" "}
+            {meeting.created_at
+              ? new Date(meeting.created_at).toLocaleString(undefined, {
+                  dateStyle: "medium",
+                  timeStyle: "short",
+                })
+              : "Recently"}
           </p>
         </div>
 
-        {/* Action Controls */}
+        {/* Action Controls Toolbar */}
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          {/* Recording Toggle */}
+          {/* Recording Toggle (Default OFF Rule) */}
           <button
             onClick={handleToggleRecording}
             className={`btn btn-sm ${recording?.enabled ? "btn-danger" : "btn-secondary"}`}
             title="Recording consent toggle"
           >
-            {recording?.enabled ? "Recording: ON" : "Record: OFF"}
+            {recording?.enabled ? "🔴 Recording: ON" : "⚪ Record: OFF"}
           </button>
 
-          {/* Upload Button */}
+          {/* Upload Audio Button */}
           <label className="btn btn-secondary btn-sm" style={{ cursor: uploading ? "wait" : "pointer" }}>
             {uploading ? (
               <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span className="spinner"></span>
+                <span className="spinner" />
                 <span>Transcribing...</span>
               </span>
             ) : (
-              <span>Upload Audio</span>
+              <span>📤 Upload Audio</span>
             )}
             <input
               type="file"
@@ -428,7 +440,7 @@ export default function MeetingDetailPage() {
             />
           </label>
 
-          {/* Analyze Button */}
+          {/* Analyze Meeting Button */}
           <button
             onClick={handleAnalyze}
             className="btn btn-primary btn-sm"
@@ -436,17 +448,17 @@ export default function MeetingDetailPage() {
           >
             {analyzing ? (
               <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span className="spinner"></span>
-                <span>Analyzing...</span>
+                <span className="spinner" />
+                <span>AI Analyzing...</span>
               </span>
             ) : (
-              <span>Analyze Meeting</span>
+              <span>⚡ Generate Notes</span>
             )}
           </button>
         </div>
       </div>
 
-      {/* Block 3: Live Microphone Stream Component */}
+      {/* Live Voice Stream Capture Component */}
       <LiveRecorder
         meetingId={meetingId}
         onNewSegment={handleLiveSegment}
@@ -457,56 +469,67 @@ export default function MeetingDetailPage() {
       {error && <div className="alert-box alert-error">{error}</div>}
       {success && <div className="alert-box alert-success">{success}</div>}
 
-      {/* Tabs */}
+      {/* Tab Navigation */}
       <div className="tabs-nav">
         <button
           className={`tab-btn ${activeTab === "summary" ? "active" : ""}`}
           onClick={() => setActiveTab("summary")}
         >
-          Summary
+          <span>📄</span>
+          <span>Executive Summary</span>
         </button>
         <button
           className={`tab-btn ${activeTab === "decisions" ? "active" : ""}`}
           onClick={() => setActiveTab("decisions")}
         >
-          Decisions ({meeting.decisions?.length || 0})
+          <span>⚖️</span>
+          <span>Decisions ({meeting.decisions?.length || 0})</span>
         </button>
         <button
           className={`tab-btn ${activeTab === "tasks" ? "active" : ""}`}
           onClick={() => setActiveTab("tasks")}
         >
-          Action Items ({meeting.action_items?.length || 0})
+          <span>🎯</span>
+          <span>Action Items ({meeting.action_items?.length || 0})</span>
         </button>
         <button
           className={`tab-btn ${activeTab === "transcript" ? "active" : ""}`}
           onClick={() => setActiveTab("transcript")}
         >
-          Transcript ({meeting.segments?.length || (meeting.transcript ? 1 : 0)})
+          <span>🎙️</span>
+          <span>Transcript Timeline ({meeting.segments?.length || (meeting.transcript ? 1 : 0)})</span>
         </button>
         <button
           className={`tab-btn ${activeTab === "chat" ? "active" : ""}`}
           onClick={() => setActiveTab("chat")}
         >
-          AI Q&A Copilot
+          <span>💬</span>
+          <span>AI Meeting Copilot</span>
         </button>
         <button
           className={`tab-btn ${activeTab === "agent" ? "active" : ""}`}
           onClick={() => setActiveTab("agent")}
         >
-          Agent
+          <span>🤖</span>
+          <span>Zoom Bot Controller</span>
         </button>
       </div>
 
-      {/* Panels */}
-      <div className="glass-panel" style={{ minHeight: 380, padding: 24 }}>
+      {/* Main Workspace Panels */}
+      <div className="glass-panel" style={{ minHeight: 420, padding: 28 }}>
         {/* SUMMARY TAB */}
         {activeTab === "summary" && (
           <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <h3 style={{ fontSize: 16 }}>Executive Summary</h3>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <div>
+                <h3 style={{ fontSize: 18, marginBottom: 4 }}>Executive Summary & Highlights</h3>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                  Synthesized automatically from the complete meeting transcript
+                </span>
+              </div>
               {meeting.summary && (
-                <span className="badge badge-cyan">
-                  {meeting.summary.provider || "ollama"}
+                <span className="badge badge-purple">
+                  Engine: {meeting.summary.provider || "Ollama Local LLM"}
                 </span>
               )}
             </div>
@@ -515,29 +538,30 @@ export default function MeetingDetailPage() {
               <div
                 style={{
                   background: "var(--bg-input)",
-                  padding: 18,
-                  borderRadius: "var(--radius-sm)",
-                  lineHeight: 1.6,
-                  fontSize: 14,
+                  padding: 24,
+                  borderRadius: "var(--radius-md)",
+                  lineHeight: 1.7,
+                  fontSize: 15,
                   whiteSpace: "pre-wrap",
                   border: "1px solid var(--border-subtle)",
+                  color: "#f8fafc",
                 }}
               >
                 {meeting.summary.text}
               </div>
             ) : (
-              <div style={{ textAlign: "center", padding: "50px 20px", color: "var(--text-muted)" }}>
-                <p style={{ marginBottom: 14, fontSize: 14 }}>
-                  No summary generated yet.
+              <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }}>
+                <div style={{ fontSize: 36, marginBottom: 12 }}>📄</div>
+                <h4 style={{ fontSize: 16, color: "#fff", marginBottom: 6 }}>No summary generated yet</h4>
+                <p style={{ marginBottom: 18, fontSize: 13, color: "var(--text-secondary)" }}>
+                  {meeting.transcript
+                    ? "Click the button below to extract summary, decisions, and action items using AI."
+                    : "Upload an audio recording or use the Live Mic above to generate transcript."}
                 </p>
-                {meeting.transcript ? (
+                {meeting.transcript && (
                   <button onClick={handleAnalyze} className="btn btn-primary btn-sm" disabled={analyzing}>
-                    Run Analysis
+                    {analyzing ? "Synthesizing Notes..." : "Generate AI Summary"}
                   </button>
-                ) : (
-                  <p style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-                    Use the Live Mic above or upload audio to generate transcript and summary.
-                  </p>
                 )}
               </div>
             )}
@@ -547,56 +571,90 @@ export default function MeetingDetailPage() {
         {/* DECISIONS TAB */}
         {activeTab === "decisions" && (
           <div>
-            <h3 style={{ fontSize: 16, marginBottom: 16 }}>Decisions</h3>
+            <div style={{ marginBottom: 20 }}>
+              <h3 style={{ fontSize: 18, marginBottom: 4 }}>Key Decisions Log</h3>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                Explicit agreements and architectural/business conclusions reached during the meeting
+              </span>
+            </div>
+
             {meeting.decisions && meeting.decisions.length > 0 ? (
-              <div style={{ display: "grid", gap: 10 }}>
+              <div style={{ display: "grid", gap: 14 }}>
                 {meeting.decisions.map((d, index) => (
                   <div
                     key={d.id || index}
                     style={{
                       background: "var(--bg-input)",
-                      padding: "14px 16px",
+                      padding: "16px 20px",
                       borderRadius: "var(--radius-sm)",
-                      border: "1px solid var(--border-subtle)",
-                      fontSize: 14,
-                      lineHeight: 1.5,
+                      border: "1px solid rgba(16, 185, 129, 0.2)",
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 14,
                     }}
                   >
-                    {d.text}
+                    <div
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: "50%",
+                        background: "rgba(16, 185, 129, 0.12)",
+                        color: "#34d399",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: 14,
+                        fontWeight: 700,
+                        flexShrink: 0,
+                      }}
+                    >
+                      ✓
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ fontSize: 15, lineHeight: 1.5, color: "#f8fafc" }}>
+                        {d.text}
+                      </p>
+                    </div>
                   </div>
                 ))}
               </div>
             ) : (
-              <div style={{ textAlign: "center", padding: "50px 20px", color: "var(--text-muted)" }}>
-                <p style={{ fontSize: 14 }}>No decisions recorded yet.</p>
+              <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }}>
+                <div style={{ fontSize: 32, marginBottom: 12 }}>⚖️</div>
+                <p style={{ fontSize: 14 }}>No decisions recorded yet. Run analysis to extract decisions.</p>
               </div>
             )}
           </div>
         )}
 
-        {/* TASKS TAB */}
+        {/* TASKS & ACTION ITEMS TAB */}
         {activeTab === "tasks" && (
           <div>
-            <h3 style={{ fontSize: 16, marginBottom: 16 }}>Action Items</h3>
+            <div style={{ marginBottom: 20 }}>
+              <h3 style={{ fontSize: 18, marginBottom: 4 }}>Action Items & Assignments</h3>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                Autonomous task extraction with assignees, assigners, and deadlines
+              </span>
+            </div>
 
-            {/* Add task form */}
+            {/* Add Task Form */}
             <form
               onSubmit={handleCreateTask}
               style={{
                 display: "grid",
                 gridTemplateColumns: "2fr 1fr 1fr auto",
-                gap: 8,
-                marginBottom: 20,
+                gap: 10,
+                marginBottom: 24,
                 background: "var(--bg-input)",
-                padding: 12,
-                borderRadius: "var(--radius-sm)",
+                padding: 16,
+                borderRadius: "var(--radius-md)",
                 border: "1px solid var(--border-subtle)",
               }}
             >
               <input
                 type="text"
                 className="form-input"
-                placeholder="Task description..."
+                placeholder="Task description (e.g. Implement Zoom RTMS connector)..."
                 value={newTaskText}
                 onChange={(e) => setNewTaskText(e.target.value)}
                 required
@@ -604,25 +662,25 @@ export default function MeetingDetailPage() {
               <input
                 type="text"
                 className="form-input"
-                placeholder="Assignee (optional)"
+                placeholder="Assignee (e.g. Hamza)"
                 value={newTaskAssignee}
                 onChange={(e) => setNewTaskAssignee(e.target.value)}
               />
               <input
                 type="text"
                 className="form-input"
-                placeholder="Deadline (optional)"
+                placeholder="Deadline (e.g. Friday 5 PM)"
                 value={newTaskDeadline}
                 onChange={(e) => setNewTaskDeadline(e.target.value)}
               />
               <button type="submit" className="btn btn-primary btn-sm" disabled={addingTask || !newTaskText.trim()}>
-                {addingTask ? "Adding..." : "Add"}
+                {addingTask ? "Adding..." : "+ Assign Task"}
               </button>
             </form>
 
-            {/* Tasks list */}
+            {/* Task List */}
             {meeting.action_items && meeting.action_items.length > 0 ? (
-              <div style={{ display: "grid", gap: 8 }}>
+              <div style={{ display: "grid", gap: 10 }}>
                 {meeting.action_items.map((item) => (
                   <div
                     key={item.id}
@@ -630,38 +688,54 @@ export default function MeetingDetailPage() {
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "space-between",
-                      gap: 14,
+                      gap: 16,
                       background: "var(--bg-input)",
-                      padding: "12px 16px",
+                      padding: "16px 20px",
                       borderRadius: "var(--radius-sm)",
-                      border: "1px solid var(--border-subtle)",
+                      border: item.status === "done" ? "1px solid rgba(255, 255, 255, 0.04)" : "1px solid var(--border-card)",
+                      transition: "all 0.15s ease",
                     }}
                   >
-                    <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 14, flex: 1 }}>
                       <input
                         type="checkbox"
                         checked={item.status === "done"}
                         onChange={() => handleToggleTaskStatus(item.id, item.status)}
                         style={{
-                          width: 16,
-                          height: 16,
+                          width: 18,
+                          height: 18,
                           cursor: "pointer",
+                          accentColor: "var(--accent-indigo)",
                         }}
                       />
                       <div>
                         <p
                           style={{
-                            fontSize: 14,
-                            marginBottom: 2,
+                            fontSize: 15,
+                            fontWeight: 500,
+                            marginBottom: 4,
                             textDecoration: item.status === "done" ? "line-through" : "none",
-                            color: item.status === "done" ? "var(--text-muted)" : "var(--text-primary)",
+                            color: item.status === "done" ? "var(--text-muted)" : "#ffffff",
                           }}
                         >
                           {item.task}
                         </p>
-                        <div style={{ display: "flex", gap: 10, fontSize: 12, color: "var(--text-muted)" }}>
-                          {item.assignee && <span>Assignee: {item.assignee}</span>}
-                          {item.deadline && <span>Due: {item.deadline}</span>}
+                        <div style={{ display: "flex", gap: 14, fontSize: 12, color: "var(--text-muted)", flexWrap: "wrap" }}>
+                          {item.assignee && (
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#a5b4fc" }}>
+                              👤 Assignee: {item.assignee}
+                            </span>
+                          )}
+                          {item.assigned_by && (
+                            <span style={{ color: "var(--text-muted)" }}>
+                              From: {item.assigned_by}
+                            </span>
+                          )}
+                          {item.deadline && (
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#fde047" }}>
+                              ⏰ Due: {item.deadline}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -669,7 +743,7 @@ export default function MeetingDetailPage() {
                     <button
                       onClick={() => handleDeleteTask(item.id)}
                       className="btn btn-secondary btn-sm"
-                      style={{ padding: "3px 8px", fontSize: 12 }}
+                      style={{ padding: "4px 10px", fontSize: 12, color: "var(--accent-rose)" }}
                       title="Delete task"
                     >
                       Delete
@@ -678,32 +752,32 @@ export default function MeetingDetailPage() {
                 ))}
               </div>
             ) : (
-              <div style={{ textAlign: "center", padding: "40px 0", color: "var(--text-muted)" }}>
-                <p style={{ fontSize: 14 }}>No action items recorded.</p>
+              <div style={{ textAlign: "center", padding: "50px 20px", color: "var(--text-muted)" }}>
+                <p style={{ fontSize: 14 }}>No action items recorded yet.</p>
               </div>
             )}
           </div>
         )}
 
-        {/* TRANSCRIPT TAB (with Speaker Diarization Mapping & Search) */}
+        {/* TRANSCRIPT TIMELINE TAB */}
         {activeTab === "transcript" && (
           <div>
-            {/* Speaker identification bar */}
+            {/* Identified Speakers Bar */}
             {speakers.length > 0 && (
               <div
                 style={{
                   background: "var(--bg-input)",
-                  padding: "12px 16px",
+                  padding: "14px 18px",
                   borderRadius: "var(--radius-sm)",
                   border: "1px solid var(--border-subtle)",
-                  marginBottom: 16,
+                  marginBottom: 20,
                   display: "flex",
                   alignItems: "center",
                   gap: 12,
                   flexWrap: "wrap",
                 }}
               >
-                <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-secondary)" }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-secondary)" }}>
                   Identified Speakers:
                 </span>
                 {speakers.map((spk) => (
@@ -713,16 +787,16 @@ export default function MeetingDetailPage() {
                         <input
                           type="text"
                           className="form-input"
-                          style={{ padding: "3px 8px", fontSize: 12, width: 120 }}
+                          style={{ padding: "4px 10px", fontSize: 12, width: 140 }}
                           value={editSpeakerName}
                           onChange={(e) => setEditSpeakerName(e.target.value)}
-                          placeholder="Name..."
+                          placeholder="Speaker name..."
                           autoFocus
                         />
                         <button
                           onClick={() => handleRenameSpeaker(spk.id)}
                           className="btn btn-primary btn-sm"
-                          style={{ padding: "2px 8px", fontSize: 11 }}
+                          style={{ padding: "3px 10px", fontSize: 11 }}
                           disabled={updatingSpeaker}
                         >
                           Save
@@ -730,7 +804,7 @@ export default function MeetingDetailPage() {
                         <button
                           onClick={() => setEditingSpeakerId(null)}
                           className="btn btn-secondary btn-sm"
-                          style={{ padding: "2px 6px", fontSize: 11 }}
+                          style={{ padding: "3px 8px", fontSize: 11 }}
                         >
                           ✕
                         </button>
@@ -742,11 +816,11 @@ export default function MeetingDetailPage() {
                           setEditSpeakerName(spk.display_name || spk.speaker_label);
                         }}
                         className="badge badge-indigo"
-                        style={{ cursor: "pointer", border: "1px solid var(--border-card-hover)" }}
+                        style={{ cursor: "pointer" }}
                         title="Click to rename speaker"
                       >
                         <span>{spk.display_name || spk.speaker_label}</span>
-                        <span style={{ opacity: 0.6, fontSize: 10 }}>✎</span>
+                        <span style={{ opacity: 0.7, fontSize: 11 }}>✎</span>
                       </button>
                     )}
                   </div>
@@ -759,18 +833,23 @@ export default function MeetingDetailPage() {
                 display: "flex",
                 justifyContent: "space-between",
                 alignItems: "center",
-                marginBottom: 16,
+                marginBottom: 18,
                 flexWrap: "wrap",
-                gap: 10,
+                gap: 12,
               }}
             >
-              <h3 style={{ fontSize: 16 }}>Transcript Timeline</h3>
+              <div>
+                <h3 style={{ fontSize: 18, marginBottom: 2 }}>Transcript Timeline</h3>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                  Timestamped segments from speech recognition engine
+                </span>
+              </div>
 
               <input
                 type="text"
                 className="form-input"
                 placeholder="Search transcript..."
-                style={{ width: 200, padding: "6px 10px", fontSize: 13 }}
+                style={{ width: 240, padding: "8px 14px", fontSize: 13 }}
                 value={transcriptSearch}
                 onChange={(e) => setTranscriptSearch(e.target.value)}
               />
@@ -780,10 +859,10 @@ export default function MeetingDetailPage() {
               <div
                 style={{
                   display: "grid",
-                  gap: 10,
-                  maxHeight: 480,
+                  gap: 12,
+                  maxHeight: 520,
                   overflowY: "auto",
-                  paddingRight: 4,
+                  paddingRight: 6,
                 }}
               >
                 {filteredSegments.map((seg, idx) => (
@@ -791,7 +870,7 @@ export default function MeetingDetailPage() {
                     key={seg.id || idx}
                     style={{
                       background: "var(--bg-input)",
-                      padding: "12px 14px",
+                      padding: "14px 18px",
                       borderRadius: "var(--radius-sm)",
                       border: "1px solid var(--border-subtle)",
                     }}
@@ -802,17 +881,17 @@ export default function MeetingDetailPage() {
                         justifyContent: "space-between",
                         fontSize: 12,
                         color: "var(--text-muted)",
-                        marginBottom: 4,
+                        marginBottom: 6,
                       }}
                     >
                       <span className="badge badge-cyan" style={{ fontSize: 11 }}>
                         {getSpeakerDisplayName(seg.speaker_label)}
                       </span>
-                      <span>
+                      <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-dim)" }}>
                         [{formatTime(seg.start_time)} - {formatTime(seg.end_time)}]
                       </span>
                     </div>
-                    <p style={{ fontSize: 14, lineHeight: 1.5 }}>{seg.text}</p>
+                    <p style={{ fontSize: 14, lineHeight: 1.6, color: "#f8fafc" }}>{seg.text}</p>
                   </div>
                 ))}
               </div>
@@ -820,20 +899,22 @@ export default function MeetingDetailPage() {
               <div
                 style={{
                   background: "var(--bg-input)",
-                  padding: 16,
+                  padding: 20,
                   borderRadius: "var(--radius-sm)",
-                  lineHeight: 1.6,
+                  lineHeight: 1.7,
                   fontSize: 14,
                   whiteSpace: "pre-wrap",
+                  color: "#f8fafc",
                 }}
               >
                 {meeting.transcript}
               </div>
             ) : (
-              <div style={{ textAlign: "center", padding: "50px 20px", color: "var(--text-muted)" }}>
-                <p style={{ marginBottom: 14, fontSize: 14 }}>No transcript available for this meeting.</p>
-                <label className="btn btn-secondary btn-sm" style={{ cursor: "pointer" }}>
-                  Upload Audio
+              <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }}>
+                <div style={{ fontSize: 32, marginBottom: 12 }}>🎙️</div>
+                <p style={{ marginBottom: 16, fontSize: 14 }}>No transcript available for this session.</p>
+                <label className="btn btn-primary btn-sm" style={{ cursor: "pointer" }}>
+                  Upload Audio Recording
                   <input type="file" accept="audio/*" hidden onChange={handleAudioUpload} />
                 </label>
               </div>
@@ -841,17 +922,17 @@ export default function MeetingDetailPage() {
           </div>
         )}
 
-        {/* AI MEETING CHAT TAB (Block 2) with TTS Voice (Block 3) */}
+        {/* AI MEETING COPILOT & VOICE Q&A TAB */}
         {activeTab === "chat" && (
           <div>
-            <div style={{ marginBottom: 16 }}>
-              <h3 style={{ fontSize: 16, marginBottom: 4 }}>Meeting Q&A Copilot</h3>
+            <div style={{ marginBottom: 18 }}>
+              <h3 style={{ fontSize: 18, marginBottom: 4 }}>Meeting Q&A Copilot</h3>
               <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                Ask any question grounded directly in this meeting's transcript, decisions, and action items.
+                Ask questions grounded directly in this meeting&apos;s audio transcript, decisions, and action items.
               </p>
             </div>
 
-            {/* Quick Suggestions */}
+            {/* Quick Suggestion Chips */}
             <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
               <button
                 type="button"
@@ -860,7 +941,7 @@ export default function MeetingDetailPage() {
                 style={{ fontSize: 12 }}
                 disabled={chatLoading}
               >
-                Key Decisions?
+                ⚖️ Key Decisions?
               </button>
               <button
                 type="button"
@@ -869,38 +950,38 @@ export default function MeetingDetailPage() {
                 style={{ fontSize: 12 }}
                 disabled={chatLoading}
               >
-                Assigned Tasks?
+                🎯 Assigned Tasks?
               </button>
               <button
                 type="button"
-                onClick={() => handleSendChatMessage("Summarize the meeting in 3 bullet points.")}
+                onClick={() => handleSendChatMessage("Summarize the main discussion points in 3 concise bullets.")}
                 className="btn btn-secondary btn-sm"
                 style={{ fontSize: 12 }}
                 disabled={chatLoading}
               >
-                3-Bullet Summary
+                📑 3-Bullet Summary
               </button>
             </div>
 
-            {/* Chat Thread */}
+            {/* Chat Messages Container */}
             <div
               style={{
                 background: "var(--bg-input)",
                 border: "1px solid var(--border-subtle)",
-                borderRadius: "var(--radius-sm)",
-                padding: 16,
-                minHeight: 220,
-                maxHeight: 380,
+                borderRadius: "var(--radius-md)",
+                padding: 20,
+                minHeight: 280,
+                maxHeight: 420,
                 overflowY: "auto",
                 display: "flex",
                 flexDirection: "column",
-                gap: 12,
+                gap: 14,
                 marginBottom: 16,
               }}
             >
               {chatMessages.length === 0 ? (
-                <div style={{ textAlign: "center", padding: "40px 0", color: "var(--text-muted)", fontSize: 13 }}>
-                  Type a question below or click one of the suggestion chips above.
+                <div style={{ textAlign: "center", padding: "50px 0", color: "var(--text-muted)", fontSize: 14 }}>
+                  Ask any question about this meeting or click one of the quick suggestions above.
                 </div>
               ) : (
                 chatMessages.map((msg, idx) => (
@@ -909,18 +990,19 @@ export default function MeetingDetailPage() {
                     style={{
                       alignSelf: msg.sender === "user" ? "flex-end" : "flex-start",
                       maxWidth: "85%",
-                      background: msg.sender === "user" ? "var(--accent-primary)" : "var(--bg-card)",
-                      color: "#fff",
-                      padding: "10px 14px",
-                      borderRadius: "var(--radius-sm)",
+                      background: msg.sender === "user" ? "var(--accent-gradient)" : "var(--bg-card)",
+                      color: "#ffffff",
+                      padding: "12px 18px",
+                      borderRadius: "var(--radius-md)",
                       border: msg.sender === "ai" ? "1px solid var(--border-card)" : "none",
                       fontSize: 14,
-                      lineHeight: 1.5,
+                      lineHeight: 1.6,
+                      boxShadow: "var(--shadow-sm)",
                     }}
                   >
                     <p style={{ whiteSpace: "pre-wrap" }}>{msg.text}</p>
-                    
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, gap: 10 }}>
+
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, gap: 12 }}>
                       {msg.sources && msg.sources.length > 0 ? (
                         <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
                           Sources: {msg.sources.join(" · ")}
@@ -932,7 +1014,7 @@ export default function MeetingDetailPage() {
                           type="button"
                           onClick={() => handleSpeakText(msg.text)}
                           className="btn btn-secondary btn-sm"
-                          style={{ padding: "2px 6px", fontSize: 11 }}
+                          style={{ padding: "3px 8px", fontSize: 11 }}
                           title="Read aloud with Text-to-Speech"
                           disabled={playingTTS}
                         >
@@ -948,53 +1030,53 @@ export default function MeetingDetailPage() {
                   style={{
                     alignSelf: "flex-start",
                     background: "var(--bg-card)",
-                    padding: "10px 14px",
-                    borderRadius: "var(--radius-sm)",
+                    padding: "12px 18px",
+                    borderRadius: "var(--radius-md)",
                     border: "1px solid var(--border-card)",
                     display: "flex",
                     alignItems: "center",
-                    gap: 8,
+                    gap: 10,
                     fontSize: 13,
                     color: "var(--text-secondary)",
                   }}
                 >
-                  <span className="spinner"></span>
-                  <span>Generating answer from meeting context...</span>
+                  <span className="spinner" />
+                  <span>Grounding answer in transcript context...</span>
                 </div>
               )}
             </div>
 
-            {/* Input form */}
+            {/* Input Form */}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 handleSendChatMessage();
               }}
-              style={{ display: "flex", gap: 8 }}
+              style={{ display: "flex", gap: 10 }}
             >
               <input
                 type="text"
                 className="form-input"
-                placeholder="Ask about this meeting..."
+                placeholder="Ask about this meeting (e.g. What did the team conclude about deployment?)..."
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 disabled={chatLoading}
               />
-              <button type="submit" className="btn btn-primary btn-sm" disabled={chatLoading || !chatInput.trim()}>
-                Ask
+              <button type="submit" className="btn btn-primary" disabled={chatLoading || !chatInput.trim()}>
+                Ask AI
               </button>
             </form>
           </div>
         )}
 
-        {/* AGENT & ZOOM BOT TAB */}
+        {/* ZOOM AUTONOMOUS BOT CONTROLLER TAB */}
         {activeTab === "agent" && (
           <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 22 }}>
               <div>
-                <h3 style={{ fontSize: 16, marginBottom: 4 }}>Zoom Bot & AI Assistant Agent</h3>
+                <h3 style={{ fontSize: 18, marginBottom: 4 }}>Zoom Autonomous Meeting Bot</h3>
                 <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                  Autonomous bot client that joins live Zoom meetings and streams audio.
+                  Connect the autonomous AI bot to listen, transcribe, answer queries, and extract tasks.
                 </p>
               </div>
 
@@ -1007,47 +1089,54 @@ export default function MeetingDetailPage() {
                       ? "badge-rose"
                       : "badge-amber"
                   }`}
-                  style={{ textTransform: "uppercase" }}
+                  style={{ textTransform: "uppercase", padding: "6px 14px", fontSize: 13 }}
                 >
                   Bot Status: {agentState}
                 </span>
               </div>
             </div>
 
-            {/* Zoom Meeting Join Card */}
+            {/* Controller Card */}
             <div
               style={{
                 background: "var(--bg-input)",
-                padding: 20,
-                borderRadius: "var(--radius-sm)",
+                padding: 24,
+                borderRadius: "var(--radius-md)",
                 border: "1px solid var(--border-subtle)",
-                marginBottom: 16,
+                marginBottom: 20,
               }}
             >
-              <h4 style={{ fontSize: 14, marginBottom: 10 }}>Connect Bot to Live Zoom Meeting</h4>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <h4 style={{ fontSize: 15, marginBottom: 12, color: "#fff" }}>Launch Autonomous Agent Session</h4>
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
                 <input
                   type="text"
                   className="form-input"
-                  style={{ flex: 1, minWidth: 260 }}
-                  placeholder="Paste Zoom Meeting Link or ID (e.g. https://zoom.us/j/123456789)..."
+                  style={{ flex: 1, minWidth: 280 }}
+                  placeholder="Zoom Meeting URL or ID (e.g. https://zoom.us/j/849203948)..."
+                  disabled
                 />
                 <button
                   type="button"
                   onClick={handleAgentToggle}
-                  className={`btn btn-sm ${agentState === "listening" ? "btn-danger" : "btn-primary"}`}
+                  className={`btn ${agentState === "listening" ? "btn-danger" : "btn-primary"}`}
                   disabled={agentBusy}
                 >
-                  {agentBusy
-                    ? "Connecting..."
-                    : agentState === "listening"
-                    ? "Disconnect Zoom Bot"
-                    : "Join Zoom Meeting"}
+                  {agentBusy ? (
+                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span className="spinner" />
+                      <span>Processing...</span>
+                    </span>
+                  ) : agentState === "listening" ? (
+                    "Disconnect Agent"
+                  ) : (
+                    "Start Autonomous Agent"
+                  )}
                 </button>
               </div>
-              <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
-                The bot will connect via Zoom RTMS, capture the audio, and populate the live transcript in real-time.
-              </p>
+
+              <div style={{ background: "rgba(99, 102, 241, 0.08)", border: "1px solid rgba(99, 102, 241, 0.2)", borderRadius: "var(--radius-sm)", padding: 14, fontSize: 13, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+                💡 <strong>How Zoom Bot operates:</strong> When enabled, the agent joins the call as a participant, taps into the Real-Time Media Stream (RTMS), sends audio chunks to local `faster-whisper`, performs speaker diarization, and extracts action items with assignees directly to your dashboard.
+              </div>
             </div>
           </div>
         )}
