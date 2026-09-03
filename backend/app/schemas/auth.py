@@ -14,6 +14,8 @@ class LoginRequest(BaseModel):
 class UserResponse(BaseModel):
     id: int
     email: EmailStr
+    full_name: str | None = None
+    role: str = "employee"
 
 
 class TokenResponse(BaseModel):

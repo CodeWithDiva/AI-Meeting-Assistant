@@ -54,6 +54,8 @@ export default function MeetingDetailPage() {
   // Agent status
   const [agentState, setAgentState] = useState<string>("idle");
   const [agentBusy, setAgentBusy] = useState(false);
+  const [zoomUrlOrId, setZoomUrlOrId] = useState("");
+  const [zoomAuthorizing, setZoomAuthorizing] = useState(false);
 
   useEffect(() => {
     if (!authStorage.isLoggedIn()) {
@@ -65,21 +67,30 @@ export default function MeetingDetailPage() {
     }
   }, [meetingId, router]);
 
+  useEffect(() => {
+    if (!authStorage.isLoggedIn()) return;
+    const refreshAgentStatus = () => {
+      api.getZoomStatus(meetingId).then((status) => setAgentState(status.status || "idle")).catch(() => undefined);
+    };
+    const interval = window.setInterval(refreshAgentStatus, 3000);
+    return () => window.clearInterval(interval);
+  }, [meetingId]);
+
   async function loadMeetingData() {
     setLoading(true);
     setError("");
     try {
-      const [detail, recData, speakersData, agentData] = await Promise.all([
+      const [detail, recData, speakersData, zoomData] = await Promise.all([
         api.getMeeting(meetingId),
         api.getRecording(meetingId).catch(() => null),
         api.getSpeakers(meetingId).catch(() => []),
-        api.getAgentStatus().catch(() => ({ state: "idle" })),
+        api.getZoomStatus(meetingId).catch(() => ({ status: "idle" })),
       ]);
 
       setMeeting(detail);
       setRecording(recData);
       setSpeakers(speakersData);
-      setAgentState(agentData.state || "idle");
+      setAgentState(zoomData.status || "idle");
     } catch (err: any) {
       setError(err?.message || "Failed to load meeting details");
     } finally {
@@ -304,22 +315,37 @@ export default function MeetingDetailPage() {
   }
 
   async function handleAgentToggle() {
+    if ((agentState === "idle" || agentState === "stopped" || agentState === "left") && !zoomUrlOrId.trim()) {
+      setError("Enter a Zoom meeting URL or meeting ID first.");
+      return;
+    }
     setAgentBusy(true);
     setError("");
     try {
-      if (agentState === "idle" || agentState === "stopped") {
-        await api.startAgent(meetingId, "simulated");
+      if (agentState === "idle" || agentState === "stopped" || agentState === "left") {
+        const result = await api.joinZoomMeeting(meetingId, zoomUrlOrId.trim());
         setAgentState("listening");
-        setSuccess("AI Assistant Agent connected to meeting stream.");
+        setSuccess(result.message || "Zoom agent connected to the meeting stream.");
       } else {
-        await api.stopAgent();
-        setAgentState("stopped");
-        setSuccess("AI Assistant Agent disconnected.");
+        const result = await api.leaveZoomMeeting(meetingId);
+        setAgentState("left");
+        setSuccess(result.message || "Zoom agent disconnected.");
       }
     } catch (err: any) {
       setError(err?.message || "Failed to update agent state");
     } finally {
       setAgentBusy(false);
+    }
+  }
+
+  async function handleZoomAuthorize() {
+    setZoomAuthorizing(true);
+    try {
+      const result = await api.getZoomAuthorizationUrl();
+      window.location.href = result.authorization_url;
+    } catch (err: any) {
+      setError(err?.message || "Could not start Zoom authorization.");
+      setZoomAuthorizing(false);
     }
   }
 
@@ -333,6 +359,19 @@ export default function MeetingDetailPage() {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  }
+
+  function getAgentPresentation(state: string) {
+    const states: Record<string, { label: string; badge: string }> = {
+      idle: { label: "Scheduled", badge: "badge-amber" },
+      joining: { label: "Joining...", badge: "badge-amber" },
+      listening: { label: "Live", badge: "badge-emerald" },
+      processing: { label: "Processing", badge: "badge-cyan" },
+      leaving: { label: "Disconnecting", badge: "badge-amber" },
+      stopped: { label: "Disconnected", badge: "badge-rose" },
+      failed_join: { label: "Failed - Retry", badge: "badge-rose" },
+    };
+    return states[state] || { label: state.replaceAll("_", " "), badge: "badge-amber" };
   }
 
   if (loading) {
@@ -1081,17 +1120,10 @@ export default function MeetingDetailPage() {
               </div>
 
               <div>
-                <span
-                  className={`badge ${
-                    agentState === "listening"
-                      ? "badge-emerald"
-                      : agentState === "stopped"
-                      ? "badge-rose"
-                      : "badge-amber"
-                  }`}
+                <span className={`badge ${getAgentPresentation(agentState).badge}`}
                   style={{ textTransform: "uppercase", padding: "6px 14px", fontSize: 13 }}
                 >
-                  Bot Status: {agentState}
+                  Bot Status: {getAgentPresentation(agentState).label}
                 </span>
               </div>
             </div>
@@ -1113,7 +1145,9 @@ export default function MeetingDetailPage() {
                   className="form-input"
                   style={{ flex: 1, minWidth: 280 }}
                   placeholder="Zoom Meeting URL or ID (e.g. https://zoom.us/j/849203948)..."
-                  disabled
+                  value={zoomUrlOrId}
+                  onChange={(event) => setZoomUrlOrId(event.target.value)}
+                  disabled={agentBusy || agentState === "listening"}
                 />
                 <button
                   type="button"
@@ -1129,14 +1163,17 @@ export default function MeetingDetailPage() {
                   ) : agentState === "listening" ? (
                     "Disconnect Agent"
                   ) : (
-                    "Start Autonomous Agent"
+                    agentState === "stopped" || agentState === "left" ? "Retry Agent" : "Start Zoom Agent"
                   )}
                 </button>
               </div>
 
-              <div style={{ background: "rgba(99, 102, 241, 0.08)", border: "1px solid rgba(99, 102, 241, 0.2)", borderRadius: "var(--radius-sm)", padding: 14, fontSize: 13, lineHeight: 1.6, color: "var(--text-secondary)" }}>
-                💡 <strong>How Zoom Bot operates:</strong> When enabled, the agent joins the call as a participant, taps into the Real-Time Media Stream (RTMS), sends audio chunks to local `faster-whisper`, performs speaker diarization, and extracts action items with assignees directly to your dashboard.
+              <div style={{ background: "var(--accent-gradient-subtle)", border: "1px solid #c6e5d7", borderRadius: "var(--radius-sm)", padding: 14, fontSize: 13, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+                <strong>Integration status:</strong> RTMS is a media stream, not a normal Zoom participant. Authorize the Zoom app first; after that, Zoom must deliver the RTMS lifecycle event before audio and transcription can begin.
               </div>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={handleZoomAuthorize} disabled={zoomAuthorizing} style={{ marginTop: 12 }}>
+                {zoomAuthorizing ? "Opening Zoom..." : "Authorize Zoom for RTMS"}
+              </button>
             </div>
           </div>
         )}

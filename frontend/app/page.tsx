@@ -16,8 +16,6 @@ export default function LandingPage() {
     }
   }, [router]);
 
-  if (!mounted) return null;
-
   return (
     <div className="app-container">
       {/* Hero Section */}

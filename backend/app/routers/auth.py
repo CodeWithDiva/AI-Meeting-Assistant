@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
@@ -16,7 +18,13 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)) -> User:
     email = request.email.lower()
     if db.scalar(select(User).where(User.email == email)):
         raise HTTPException(status_code=409, detail="Email is already registered.")
-    user = User(email=email, password_hash=hash_password(request.password))
+    admin_emails = {
+        item.strip().lower()
+        for item in os.getenv("ADMIN_EMAILS", "").split(",")
+        if item.strip()
+    }
+    role = "admin" if email in admin_emails else "employee"
+    user = User(email=email, password_hash=hash_password(request.password), role=role)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -29,7 +37,7 @@ def login(request: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
     if not user or not verify_password(request.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password.")
     try:
-        token = create_access_token(user.id)
+        token = create_access_token(user.id, user.role)
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     return TokenResponse(access_token=token, user=UserResponse.model_validate(user, from_attributes=True))
@@ -42,7 +50,7 @@ def token(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
     if not user or not verify_password(form.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password.")
     try:
-        access_token = create_access_token(user.id)
+        access_token = create_access_token(user.id, user.role)
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     return {"access_token": access_token, "token_type": "bearer"}

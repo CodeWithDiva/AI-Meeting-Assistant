@@ -10,6 +10,7 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [tasks, setTasks] = useState<ActionItem[]>([]);
+  const [currentUser, setCurrentUser] = useState<{ role?: string; full_name?: string | null; email?: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -30,7 +31,7 @@ export default function DashboardPage() {
     setLoading(true);
     setError("");
     try {
-      const [statsData, meetingsData, tasksData] = await Promise.all([
+      const [statsData, meetingsData, tasksData, userData] = await Promise.all([
         api.getDashboardStats().catch(() => ({
           total_meetings: 0,
           total_tasks: 0,
@@ -39,12 +40,14 @@ export default function DashboardPage() {
           recent_meetings: 0,
         })),
         api.getMeetings().catch(() => []),
-        api.getAllTasks("pending").catch(() => []),
+        api.getAllTasks().catch(() => []),
+        api.getMe().catch(() => null),
       ]);
 
       setStats(statsData);
       setMeetings(meetingsData);
       setTasks(tasksData);
+      setCurrentUser(userData);
     } catch (err: any) {
       setError(err?.message || "Failed to load dashboard data");
     } finally {
@@ -74,7 +77,7 @@ export default function DashboardPage() {
     try {
       await api.updateTask(taskId, { status: nextStatus });
       const [updatedTasks, updatedStats] = await Promise.all([
-        api.getAllTasks("pending"),
+        api.getAllTasks(),
         api.getDashboardStats(),
       ]);
       setTasks(updatedTasks);
@@ -92,6 +95,17 @@ export default function DashboardPage() {
     return <span className="badge badge-indigo">🎙️ Direct Audio</span>;
   }
 
+  const isAdmin = currentUser?.role === "admin";
+  const pendingTasks = tasks.filter((task) => task.status === "pending");
+  const inProgressTasks = tasks.filter((task) => task.status === "in_progress");
+  const doneTasks = tasks.filter((task) => task.status === "done");
+
+  function getMeetingState(meeting: Meeting) {
+    if (!meeting.transcript) return { label: "Scheduled", badge: "badge-amber" };
+    if (meeting.ended_at) return { label: "Done", badge: "badge-emerald" };
+    return { label: "Live", badge: "badge-cyan" };
+  }
+
   if (loading) {
     return (
       <div className="app-container" style={{ textAlign: "center", padding: "120px 0" }}>
@@ -103,20 +117,20 @@ export default function DashboardPage() {
 
   return (
     <div className="app-container">
-      {/* Hero Command Center Header */}
+      {/* Product header */}
       <div className="hero-banner">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 20 }}>
           <div>
             <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <span className="badge badge-indigo">WORKSPACE INTELLIGENCE</span>
+              <span className="badge badge-indigo">{isAdmin ? "HOST WORKSPACE" : "MY WORKSPACE"}</span>
               <span style={{ color: "var(--text-muted)", fontSize: 13 }}>•</span>
               <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Faster-Whisper STT + Local LLM Core</span>
             </div>
-            <h1 style={{ fontSize: "clamp(24px, 3.5vw, 36px)", lineHeight: 1.2, marginBottom: 8 }}>
-              Autonomous Meeting Copilot
+              <h1 style={{ fontSize: "clamp(24px, 3.5vw, 36px)", lineHeight: 1.2, marginBottom: 8 }}>
+              {isAdmin ? "Good morning. Here is your meeting ledger." : "Your work, distilled from every meeting."}
             </h1>
             <p style={{ color: "var(--text-secondary)", fontSize: 14, maxWidth: 620, lineHeight: 1.6 }}>
-              Real-time speech transcription, automated speaker diarization, decision logs, and autonomous task assignments.
+              {isAdmin ? "A clear view of meetings, actions, and the people moving work forward." : "Review your meetings and keep assigned actions moving."}
             </p>
           </div>
 
@@ -131,51 +145,40 @@ export default function DashboardPage() {
 
       {error && <div className="alert-box alert-error">{error}</div>}
 
-      {/* Stats Cards */}
-      <div className="stats-grid">
-        <div className="stat-card">
+      {/* Ledger Strip */}
+      <div className="ledger-strip">
+        <div className="ledger-cell">
           <div className="stat-header">
             <span className="stat-label">Total Meetings</span>
-            <span className="stat-icon">🎙️</span>
           </div>
           <span className="stat-value">{stats?.total_meetings ?? meetings.length}</span>
-          <div className="stat-subtext">Recorded & Transcribed</div>
+          <div className="stat-subtext">All time</div>
         </div>
-
-        <div className="stat-card">
+        <div className="ledger-cell">
           <div className="stat-header">
-            <span className="stat-label">Pending Action Items</span>
-            <span className="stat-icon">⏳</span>
+            <span className="stat-label">This Week</span>
           </div>
-          <span className="stat-value" style={{ color: "#fde047" }}>
-            {stats?.pending_tasks ?? tasks.length}
-          </span>
-          <div className="stat-subtext">Requires completion</div>
+          <span className="stat-value">{stats?.recent_meetings ?? Math.min(meetings.length, 5)}</span>
+          <div className="stat-subtext">Recent sessions</div>
         </div>
-
-        <div className="stat-card">
+        <div className="ledger-cell">
           <div className="stat-header">
-            <span className="stat-label">Resolved Tasks</span>
-            <span className="stat-icon">✅</span>
+            <span className="stat-label">Pending Tasks</span>
           </div>
-          <span className="stat-value" style={{ color: "#6ee7b7" }}>
-            {stats?.done_tasks ?? 0}
-          </span>
-          <div className="stat-subtext">Automated tracking</div>
+          <span className="stat-value">{stats?.pending_tasks ?? pendingTasks.length}</span>
+          <div className="stat-subtext">Needs attention</div>
         </div>
-
-        <div className="stat-card">
+        <div className="ledger-cell">
           <div className="stat-header">
-            <span className="stat-label">AI Extraction Accuracy</span>
-            <span className="stat-icon">⚡</span>
+            <span className="stat-label">Team Active Now</span>
           </div>
-          <span className="stat-value" style={{ color: "#a5b4fc" }}>99.2%</span>
-          <div className="stat-subtext">Structured JSON Parser</div>
+          <span className="stat-value">{isAdmin ? "—" : "1"}</span>
+          <div className="stat-subtext">Live presence coming soon</div>
         </div>
       </div>
 
       {/* Main Content Grid */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(460px, 1fr))", gap: 24 }}>
+      <div className="dashboard-zones">
         {/* Recent Meetings */}
         <div className="glass-panel">
           <div
@@ -189,8 +192,8 @@ export default function DashboardPage() {
             }}
           >
             <div>
-              <h2 style={{ fontSize: 18, marginBottom: 2 }}>Recent Meeting Sessions</h2>
-              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Browse transcripts and AI analysis</span>
+              <h2 style={{ fontSize: 18, marginBottom: 2 }}>{isAdmin ? "Recent Meetings" : "My Meetings"}</h2>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Every session, its state, and what happens next</span>
             </div>
             <Link href="/meetings" className="btn btn-secondary btn-sm">
               View All ({meetings.length}) →
@@ -224,8 +227,9 @@ export default function DashboardPage() {
                 >
                   <div style={{ flex: 1, minWidth: 0, paddingRight: 12 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                      <span className={`badge ${getMeetingState(m).badge}`}>{getMeetingState(m).label}</span>
                       {getPlatformBadge(m.platform)}
-                      <h4 style={{ fontSize: 15, fontWeight: 600, color: "#fff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      <h4 style={{ fontSize: 15, fontWeight: 600, color: "var(--text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {m.title}
                       </h4>
                     </div>
@@ -247,8 +251,18 @@ export default function DashboardPage() {
           )}
         </div>
 
+        <div className="glass-panel ask-ai-panel">
+          <span className="eyebrow">MEETING MEMORY</span>
+          <h2 style={{ fontSize: 20, margin: "8px 0" }}>Ask about a meeting</h2>
+          <p style={{ color: "var(--text-secondary)", fontSize: 13, lineHeight: 1.55, marginBottom: 20 }}>
+            Open a meeting to ask grounded questions about its transcript, decisions, and action items.
+          </p>
+          <Link href="/meetings" className="btn btn-primary" style={{ width: "100%" }}>Browse meeting memory</Link>
+          <div className="ask-ai-note">Cross-meeting search will appear here when workspace memory is connected.</div>
+        </div>
+
         {/* Action Items Board */}
-        <div className="glass-panel">
+        <div id="tasks" className="glass-panel dashboard-tasks">
           <div
             style={{
               display: "flex",
@@ -260,10 +274,10 @@ export default function DashboardPage() {
             }}
           >
             <div>
-              <h2 style={{ fontSize: 18, marginBottom: 2 }}>Pending Action Items</h2>
-              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>AI-extracted tasks with assignees</span>
+              <h2 style={{ fontSize: 18, marginBottom: 2 }}>{isAdmin ? "Action items" : "My Tasks"}</h2>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Pending, in progress, and done</span>
             </div>
-            <span className="badge badge-indigo">{tasks.length} Pending</span>
+            <span className="badge badge-indigo">{pendingTasks.length} Pending</span>
           </div>
 
           {tasks.length === 0 ? (
@@ -271,8 +285,15 @@ export default function DashboardPage() {
               <p>🎉 All action items have been completed or no tasks yet.</p>
             </div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {tasks.slice(0, 6).map((t) => (
+            <div className="task-columns">
+              {[
+                ["Pending", pendingTasks],
+                ["In Progress", inProgressTasks],
+                ["Done", doneTasks],
+              ].map(([label, columnTasks]) => (
+                <div className="task-column" key={label as string}>
+                  <div className="task-column-title">{label as string} <span>{(columnTasks as ActionItem[]).length}</span></div>
+                  {(columnTasks as ActionItem[]).slice(0, 4).map((t) => (
                 <div
                   key={t.id}
                   style={{
@@ -299,7 +320,7 @@ export default function DashboardPage() {
                     }}
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <p style={{ fontSize: 14, fontWeight: 500, marginBottom: 4, lineHeight: 1.4, color: "#f1f5f9" }}>
+                    <p style={{ fontSize: 14, fontWeight: 500, marginBottom: 4, lineHeight: 1.4, color: "var(--text-primary)" }}>
                       {t.task}
                     </p>
                     <div style={{ display: "flex", gap: 10, fontSize: 12, color: "var(--text-muted)", flexWrap: "wrap" }}>
@@ -315,6 +336,8 @@ export default function DashboardPage() {
                       )}
                     </div>
                   </div>
+                </div>
+                  ))}
                 </div>
               ))}
             </div>

@@ -22,12 +22,14 @@ import hmac
 import json
 import os
 import time
+from typing import Any
 
 import websockets
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
+_rtms_pipelines: dict[str, Any] = {}
 
 ZOOM_CLIENT_ID = os.getenv("ZOOM_CLIENT_ID", "")
 ZOOM_CLIENT_SECRET = os.getenv("ZOOM_CLIENT_SECRET", "")
@@ -105,13 +107,16 @@ async def handle_rtms_started(payload: dict):
     meeting_uuid = data["meeting_uuid"]
     rtms_stream_id = data["rtms_stream_id"]
     server_urls = data["server_urls"]  # signaling server URL
+    meeting_id = data.get("meeting_id")
+    if meeting_id is not None:
+        meeting_id = int(meeting_id)
 
     print(f"[RTMS] Started for meeting {meeting_uuid}, connecting to {server_urls}")
 
     # Background task — isko block nahi karna chahiye webhook response ko
     import asyncio
     asyncio.create_task(
-        connect_to_rtms_media_server(meeting_uuid, rtms_stream_id, server_urls)
+        connect_to_rtms_media_server(meeting_uuid, rtms_stream_id, server_urls, meeting_id)
     )
 
 
@@ -119,9 +124,9 @@ async def handle_rtms_stopped(payload: dict):
     data = payload["payload"]
     meeting_uuid = data["meeting_uuid"]
     print(f"[RTMS] Stopped for meeting {meeting_uuid}")
-    # TODO: yahan par apna existing /analyze pipeline trigger karo
-    # taake summary + decisions + action items generate ho jayen,
-    # bilkul waise jaise uploaded audio ke liye Day 16-18 mein bana tha.
+    pipeline = _rtms_pipelines.pop(meeting_uuid, None)
+    if pipeline:
+        await pipeline.finalize()
 
 
 def generate_signature(meeting_uuid: str, rtms_stream_id: str) -> str:
@@ -132,7 +137,12 @@ def generate_signature(meeting_uuid: str, rtms_stream_id: str) -> str:
     ).hexdigest()
 
 
-async def connect_to_rtms_media_server(meeting_uuid: str, rtms_stream_id: str, server_urls: str):
+async def connect_to_rtms_media_server(
+    meeting_uuid: str,
+    rtms_stream_id: str,
+    server_urls: str,
+    meeting_id: int | None = None,
+):
     """
     Signaling server se connect karke media server ka address maangte hain,
     phir media server se connect karke actual raw audio milna shuru hota hai.
@@ -157,7 +167,9 @@ async def connect_to_rtms_media_server(meeting_uuid: str, rtms_stream_id: str, s
             if msg_type == "SIGNALING_HAND_SHAKE_RESP":
                 media_server_url = msg["media_server"]["server_urls"]["audio"]
                 # Media server se connect karo — yahan se raw audio (PCM) milega
-                await stream_audio_to_pipeline(media_server_url, meeting_uuid, rtms_stream_id)
+                await stream_audio_to_pipeline(
+                    media_server_url, meeting_uuid, rtms_stream_id, meeting_id
+                )
                 break
 
             if msg_type == "KEEP_ALIVE_REQ":
@@ -167,12 +179,23 @@ async def connect_to_rtms_media_server(meeting_uuid: str, rtms_stream_id: str, s
                 }))
 
 
-async def stream_audio_to_pipeline(media_server_url: str, meeting_uuid: str, rtms_stream_id: str):
+async def stream_audio_to_pipeline(
+    media_server_url: str,
+    meeting_uuid: str,
+    rtms_stream_id: str,
+    meeting_id: int | None = None,
+):
     """
     Media WebSocket se raw audio chunks receive karke apne existing
     faster-whisper pipeline mein feed karo.
     """
     signature = generate_signature(meeting_uuid, rtms_stream_id)
+    pipeline = None
+    if meeting_id is not None:
+        from app.services.rtms_transcription import RTMSTranscriptionPipeline
+
+        pipeline = RTMSTranscriptionPipeline(meeting_id)
+        _rtms_pipelines[meeting_uuid] = pipeline
 
     async with websockets.connect(media_server_url) as media_ws:
         handshake = {
@@ -188,9 +211,8 @@ async def stream_audio_to_pipeline(media_server_url: str, meeting_uuid: str, rtm
         async for message in media_ws:
             # Binary audio frames yahan aayenge (PCM 16-bit, 16kHz typically)
             if isinstance(message, bytes):
-                # TODO: apne existing whisper service ko call karo, e.g.:
-                # await transcription_service.process_audio_chunk(message, meeting_uuid)
-                pass
+                if pipeline:
+                    await pipeline.add_chunk(message)
             else:
                 # JSON control messages (KEEP_ALIVE etc.)
                 msg = json.loads(message)

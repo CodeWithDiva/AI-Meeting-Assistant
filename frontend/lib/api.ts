@@ -6,6 +6,7 @@ export interface User {
   id: number;
   email: string;
   full_name?: string | null;
+  role?: "admin" | "employee" | string;
   created_at?: string;
 }
 
@@ -421,6 +422,10 @@ export const api = {
 
   async getZoomStatus(meetingId: number | string): Promise<{ meeting_id: number; status: string; is_connected: boolean }> {
     return apiRequest<{ meeting_id: number; status: string; is_connected: boolean }>(`/api/zoom/status/${meetingId}`);
+  },
+
+  async getZoomAuthorizationUrl(): Promise<{ authorization_url: string }> {
+    return apiRequest<{ authorization_url: string }>("/api/integrations/zoom/authorize");
   },
 
   // Notifications (Block 5)

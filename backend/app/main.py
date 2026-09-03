@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import time
+from urllib.parse import urlencode
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +28,10 @@ from app.routers.tasks import router as tasks_router
 from app.routers.transcript import router as transcript_router
 from app.routers.transcription import router as transcription_router
 from app.routers.tts import router as tts_router
-from app.routers.zoom import router as zoom_router
+from app.routers.zoom import router as zoom_bot_router
 from app.database import Base, engine
 import app.models  # noqa: F401
-from app.integrations.zoom_rtms import router as zoom_router
-app.include_router(zoom_router, prefix="/api/integrations/zoom", tags=["zoom"])
+from app.integrations.zoom_rtms import router as zoom_rtms_router
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
@@ -63,7 +63,8 @@ app.include_router(search_router)
 app.include_router(chat_router)
 app.include_router(live_transcription_router)
 app.include_router(tts_router)
-app.include_router(zoom_router)
+app.include_router(zoom_bot_router)
+app.include_router(zoom_rtms_router, prefix="/api/integrations/zoom", tags=["zoom"])
 app.include_router(notifications_router)
 app.include_router(tasks_router)
 app.include_router(analysis_router)
@@ -81,6 +82,15 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 Base.metadata.create_all(bind=engine)
 
+# Keep local MVP databases compatible when a new persisted field is introduced.
+if engine.dialect.name == "sqlite":
+    from sqlalchemy import inspect, text
+
+    user_columns = {column["name"] for column in inspect(engine).get_columns("users")}
+    if "role" not in user_columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR(20) DEFAULT 'employee'"))
+
 _zoom_token: str | None = None
 
 
@@ -88,6 +98,12 @@ _zoom_token: str | None = None
 async def health_check() -> dict[str, str]:
     """Return a lightweight service-health response."""
     return {"status": "ok"}
+
+
+@app.get("/", tags=["system"])
+async def api_root() -> dict[str, str]:
+    """Give a useful response when the API root is opened directly."""
+    return {"service": "AI Meeting Assistant API", "status": "ok"}
 
 
 def _zoom_secret_token() -> str:
@@ -157,6 +173,21 @@ async def start_zoom_rtms(meeting_id: int) -> dict[str, Any]:
 async def stop_zoom_rtms(meeting_id: int) -> dict[str, Any]:
     """Stop RTMS for a meeting using the authorized Zoom account."""
     return await _set_rtms_status(meeting_id, "stop")
+
+
+@app.get("/api/integrations/zoom/authorize", tags=["zoom"])
+async def authorize_zoom(request: Request) -> dict[str, str]:
+    """Return the Zoom OAuth URL needed before RTMS can be enabled."""
+    client_id = os.getenv("ZOOM_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=503, detail="ZOOM_CLIENT_ID is not configured.")
+    redirect_uri = str(request.url).replace("/authorize", "/callback")
+    query = urlencode({
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+    })
+    return {"authorization_url": f"https://zoom.us/oauth/authorize?{query}"}
 
 
 @app.post("/api/integrations/zoom/webhook", tags=["zoom"])

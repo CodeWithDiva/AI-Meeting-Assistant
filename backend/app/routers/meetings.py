@@ -20,9 +20,10 @@ router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 
 
 def _owned(meeting_id: int, user: User, db: Session) -> Meeting:
-    meeting = db.scalar(
-        select(Meeting).where(Meeting.id == meeting_id, Meeting.owner_id == user.id)
-    )
+    query = select(Meeting).where(Meeting.id == meeting_id)
+    if user.role != "admin":
+        query = query.where(Meeting.owner_id == user.id)
+    meeting = db.scalar(query)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found.")
     return meeting
@@ -36,7 +37,7 @@ def list_meetings(
     return list(
         db.scalars(
             select(Meeting)
-            .where(Meeting.owner_id == user.id)
+            .where(Meeting.owner_id == user.id if user.role != "admin" else True)
             .order_by(Meeting.created_at.desc())
         )
     )

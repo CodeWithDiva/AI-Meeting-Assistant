@@ -9,6 +9,7 @@ export default function Navbar() {
   const pathname = usePathname();
   const router = useRouter();
   const [isAuth, setIsAuth] = useState(false);
+  const [currentUser, setCurrentUser] = useState<{ email: string; full_name?: string | null; role?: string } | null>(null);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [showNotifMenu, setShowNotifMenu] = useState(false);
 
@@ -16,6 +17,7 @@ export default function Navbar() {
     const loggedIn = authStorage.isLoggedIn();
     setIsAuth(loggedIn);
     if (loggedIn) {
+      api.getMe().then(setCurrentUser).catch(() => setCurrentUser(null));
       loadNotifications();
     }
   }, [pathname]);
@@ -63,7 +65,7 @@ export default function Navbar() {
       <header className="navbar">
         <div className="app-container navbar-inner">
           <Link href="/" className="brand-logo">
-            <div className="brand-icon">⚡</div>
+            <div className="brand-icon" aria-hidden="true" />
             <span>AI Meeting Assistant</span>
           </Link>
         </div>
@@ -78,11 +80,11 @@ export default function Navbar() {
       <div className="app-container navbar-inner">
         <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
           <Link href="/" className="brand-logo">
-            <div className="brand-icon">⚡</div>
+              <div className="brand-icon" aria-hidden="true" />
             <div style={{ display: "flex", flexDirection: "column" }}>
               <span style={{ fontSize: 16, fontWeight: 800, letterSpacing: "-0.02em" }}>AI Meeting Assistant</span>
               <span style={{ fontSize: 10, color: "var(--accent-indigo)", fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                Autonomous Copilot v3
+                Meeting intelligence
               </span>
             </div>
           </Link>
@@ -115,16 +117,26 @@ export default function Navbar() {
                 href="/dashboard"
                 className={`nav-link ${pathname === "/dashboard" ? "active" : ""}`}
               >
-                <span>📊</span>
+                <span aria-hidden="true">01</span>
                 <span>Dashboard</span>
               </Link>
               <Link
                 href="/meetings"
                 className={`nav-link ${pathname.startsWith("/meetings") ? "active" : ""}`}
               >
-                <span>🎙️</span>
+                <span aria-hidden="true">02</span>
                 <span>Meetings</span>
               </Link>
+              {currentUser?.role === "admin" && (
+                <>
+                  <Link href="/dashboard#tasks" className={`nav-link ${pathname === "/dashboard" ? "active" : ""}`}>
+                    <span aria-hidden="true">03</span>
+                    <span>Tasks</span>
+                  </Link>
+                  <span className="nav-link" style={{ cursor: "default", color: "var(--text-muted)" }}>Team</span>
+                  <span className="nav-link" style={{ cursor: "default", color: "var(--text-muted)" }}>Settings</span>
+                </>
+              )}
 
               {/* Notifications Dropdown */}
               <div style={{ position: "relative" }}>
@@ -243,6 +255,9 @@ export default function Navbar() {
                   </div>
                 )}
               </div>
+              <button type="button" className="nav-link" onClick={handleLogout} title="Sign out">
+                {currentUser?.full_name || currentUser?.email?.split("@")[0] || "Profile"} · Sign out
+              </button>
 
               <button
                 onClick={handleLogout}

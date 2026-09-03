@@ -43,12 +43,12 @@ def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
 
 
-def create_access_token(user_id: int) -> str:
+def create_access_token(user_id: int, role: str = "employee") -> str:
     secret = os.getenv("SECRET_KEY")
     if not secret:
         raise RuntimeError("SECRET_KEY is not configured.")
     header = _b64(b'{"alg":"HS256","typ":"JWT"}')
-    payload = _b64(json.dumps({"sub": str(user_id), "exp": int(time.time()) + 1800}, separators=(",", ":")).encode())
+    payload = _b64(json.dumps({"sub": str(user_id), "role": role, "exp": int(time.time()) + 1800}, separators=(",", ":")).encode())
     signing_input = f"{header}.{payload}".encode()
     signature = _b64(hmac.new(secret.encode(), signing_input, hashlib.sha256).digest())
     return f"{header}.{payload}.{signature}"
