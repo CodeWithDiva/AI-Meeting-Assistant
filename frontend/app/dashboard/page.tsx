@@ -134,7 +134,23 @@ export default function DashboardPage() {
             </p>
           </div>
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <Link href="/tasks" className="btn btn-secondary btn-lg">
+              <span>📋</span>
+              <span>My Tasks</span>
+            </Link>
+            {isAdmin && (
+              <>
+                <Link href="/admin/team" className="btn btn-secondary btn-lg">
+                  <span>👥</span>
+                  <span>Team</span>
+                </Link>
+                <Link href="/admin/settings" className="btn btn-secondary btn-lg">
+                  <span>⚙️</span>
+                  <span>Settings</span>
+                </Link>
+              </>
+            )}
             <button onClick={() => setShowModal(true)} className="btn btn-primary btn-lg">
               <span>+</span>
               <span>New Meeting Session</span>

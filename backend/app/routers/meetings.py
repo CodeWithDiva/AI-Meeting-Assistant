@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import ActionItem, Decision, Meeting, Summary, User
-from app.ai.service import analyze_meeting
+from app.models import Meeting, User
+from app.services.meeting_analysis import analyze_and_persist
 from app.schemas.analysis import MeetingNotesResponse
 from app.schemas.meeting import (
     MeetingCreate,
@@ -59,6 +59,34 @@ def create_meeting(
     db.commit()
     db.refresh(meeting)
     return meeting
+
+
+@router.get("/{meeting_id}/insights")
+def get_meeting_insights(
+    meeting_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return transparent talk-time and engagement metrics from transcript segments."""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Insights are available to admins only.")
+    meeting = _owned(meeting_id, user, db)
+    totals: dict[str, float] = {}
+    for segment in meeting.segments:
+        speaker = segment.speaker_label or "Unknown speaker"
+        totals[speaker] = totals.get(speaker, 0.0) + max(0.0, segment.end_time - segment.start_time)
+    total_seconds = sum(totals.values())
+    participants = []
+    for speaker, seconds in sorted(totals.items(), key=lambda item: item[1], reverse=True):
+        share = seconds / total_seconds if total_seconds else 0.0
+        participants.append({
+            "speaker": speaker,
+            "talk_time_seconds": round(seconds, 2),
+            "talk_time_percent": round(share * 100, 1),
+            "engagement_score": round(min(100.0, share * 100 + min(30.0, len([s for s in meeting.segments if s.speaker_label == speaker]) * 2)), 1),
+            "coaching_tip": "Invite more voices into the discussion." if share > 0.55 else "Good balance. Keep contributing concise, clear updates.",
+        })
+    return {"meeting_id": meeting.id, "participants": participants, "sentiment": None}
 
 
 @router.get("/{meeting_id}", response_model=MeetingDetailResponse)
@@ -120,42 +148,8 @@ async def analyze_saved_meeting(
     if not meeting.transcript:
         raise HTTPException(status_code=400, detail="Meeting has no transcript to analyze.")
 
-    result = await analyze_meeting(meeting.transcript)
+    result = await analyze_and_persist(meeting_id, db)
     notes = MeetingNotesResponse.model_validate(result)
-
-    # ── Persist summary ──────────────────────────────────────────────
-    existing_summary = db.scalar(
-        select(Summary).where(Summary.meeting_id == meeting_id)
-    )
-    if existing_summary:
-        existing_summary.text = notes.summary
-        existing_summary.provider = "ollama"
-    else:
-        existing_summary = Summary(meeting_id=meeting_id, text=notes.summary, provider="ollama")
-        db.add(existing_summary)
-        meeting.summary = existing_summary
-
-    # ── Persist decisions (replace) ──────────────────────────────────
-    db.execute(
-        Decision.__table__.delete().where(Decision.meeting_id == meeting_id)
-    )
-    for decision_text in notes.decisions:
-        db.add(Decision(meeting_id=meeting_id, text=decision_text))
-
-    # ── Persist action items (replace) ───────────────────────────────
-    db.execute(
-        ActionItem.__table__.delete().where(ActionItem.meeting_id == meeting_id)
-    )
-    for item in notes.action_items:
-        db.add(
-            ActionItem(
-                meeting_id=meeting_id,
-                assignee=item.assignee,
-                assigned_by=item.assigned_by,
-                task=item.task,
-                deadline=item.deadline,
-            )
-        )
 
     # ── Create in-app notification ──────────────────────────────────
     from app.models import Notification

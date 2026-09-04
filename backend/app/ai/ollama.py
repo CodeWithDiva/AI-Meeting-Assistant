@@ -21,6 +21,9 @@ async def analyze_with_ollama(transcript: str) -> dict[str, Any]:
         '    "assigned_by": (string or null) who assigned the task\n'
         '    "task": (string) what needs to be done\n'
         '    "deadline": (string or null) when it is due\n\n'
+        "Extract EVERY distinct decision explicitly stated or agreed.\n"
+        "Extract EVERY distinct task, even when several different people are mentioned; return one action_items object per person/task pair.\n"
+        "Understand Urdu, English, and mixed Urdu-English (Roman Urdu) without translating away names or deadlines.\n"
         "If no decisions or action items were found, return empty arrays.\n\n"
         "Transcript:\n\n" + transcript
     )

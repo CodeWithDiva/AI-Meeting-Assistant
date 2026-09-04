@@ -1,7 +1,7 @@
 {
   "models": [
     {
-      "title": "Ollama Model",
+      "title": "Ollama",
       "provider": "ollama",
       "model": "qwen2.5-coder"
     }

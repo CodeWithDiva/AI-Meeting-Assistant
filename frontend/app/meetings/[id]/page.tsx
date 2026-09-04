@@ -10,6 +10,7 @@ import {
   authStorage,
   Decision,
   MeetingDetail,
+  MeetingInsights,
   Recording,
   Segment,
   Speaker,
@@ -23,7 +24,8 @@ export default function MeetingDetailPage() {
   const [meeting, setMeeting] = useState<MeetingDetail | null>(null);
   const [recording, setRecording] = useState<Recording | null>(null);
   const [speakers, setSpeakers] = useState<Speaker[]>([]);
-  const [activeTab, setActiveTab] = useState<"summary" | "decisions" | "tasks" | "transcript" | "chat" | "agent">("summary");
+  const [activeTab, setActiveTab] = useState<"summary" | "decisions" | "tasks" | "transcript" | "chat" | "agent" | "insights">("summary");
+  const [insights, setInsights] = useState<MeetingInsights | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -56,10 +58,27 @@ export default function MeetingDetailPage() {
   const [agentBusy, setAgentBusy] = useState(false);
   const [zoomUrlOrId, setZoomUrlOrId] = useState("");
   const [zoomAuthorizing, setZoomAuthorizing] = useState(false);
+  const [currentUserRole, setCurrentUserRole] = useState<string>("");
+
+  // Ava Voice Reply + Realtime WS
+  const [wsConnected, setWsConnected] = useState(false);
+  const [avaReplies, setAvaReplies] = useState<
+    { id: string; question: string; answer: string; audio_base64: string; timestamp: string }[]
+  >([]);
+  const [liveTranscripts, setLiveTranscripts] = useState<
+    { speaker: string; text: string; timestamp: string }[]
+  >([]);
+  const [avaTestInput, setAvaTestInput] = useState("");
+  const [testingAva, setTestingAva] = useState(false);
 
   useEffect(() => {
     if (!authStorage.isLoggedIn()) {
       router.push("/login");
+      return;
+    }
+    if (isNaN(meetingId)) {
+      setLoading(false);
+      setError("Invalid Meeting ID in URL. Please select a valid meeting from your dashboard or click 'Meetings' in the top navbar.");
       return;
     }
     if (meetingId) {
@@ -69,12 +88,86 @@ export default function MeetingDetailPage() {
 
   useEffect(() => {
     if (!authStorage.isLoggedIn()) return;
+    api.getMe().then((user) => setCurrentUserRole(user.role || "employee")).catch(() => undefined);
     const refreshAgentStatus = () => {
       api.getZoomStatus(meetingId).then((status) => setAgentState(status.status || "idle")).catch(() => undefined);
     };
     const interval = window.setInterval(refreshAgentStatus, 3000);
     return () => window.clearInterval(interval);
   }, [meetingId]);
+
+  useEffect(() => {
+    if (!meetingId || typeof window === "undefined") return;
+    const wsUrl = api.getMeetingWebSocketUrl(meetingId);
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.onopen = () => setWsConnected(true);
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.event === "agent_state") {
+            setAgentState(data.state || "idle");
+          } else if (data.event === "ava_reply") {
+            setAvaReplies((prev) => [
+              {
+                id: String(Date.now()),
+                question: data.question || "",
+                answer: data.answer || "",
+                audio_base64: data.audio_base64 || "",
+                timestamp: new Date().toLocaleTimeString(),
+              },
+              ...prev,
+            ]);
+          } else if (data.event === "transcript_live") {
+            setLiveTranscripts((prev) => [
+              ...prev,
+              {
+                speaker: data.speaker || "Speaker",
+                text: data.text || "",
+                timestamp: new Date().toLocaleTimeString(),
+              },
+            ]);
+          }
+        } catch {}
+      };
+      ws.onclose = () => setWsConnected(false);
+      ws.onerror = () => setWsConnected(false);
+    } catch {
+      setWsConnected(false);
+    }
+    return () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    };
+  }, [meetingId]);
+
+  async function handleTestAvaReply(e: FormEvent) {
+    e.preventDefault();
+    if (!avaTestInput.trim() || testingAva) return;
+
+    setTestingAva(true);
+    setError("");
+    try {
+      const result = await api.testVoiceReply(meetingId, avaTestInput.trim());
+      setAvaReplies((prev) => [
+        {
+          id: String(Date.now()),
+          question: result.question,
+          answer: result.answer,
+          audio_base64: result.audio_base64,
+          timestamp: new Date().toLocaleTimeString(),
+        },
+        ...prev,
+      ]);
+      setAvaTestInput("");
+    } catch (err: any) {
+      setError(err?.message || "Failed to generate Ava voice reply.");
+    } finally {
+      setTestingAva(false);
+    }
+  }
 
   async function loadMeetingData() {
     setLoading(true);
@@ -88,6 +181,7 @@ export default function MeetingDetailPage() {
       ]);
 
       setMeeting(detail);
+      setInsights(await api.getMeetingInsights(meetingId).catch(() => null));
       setRecording(recData);
       setSpeakers(speakersData);
       setAgentState(zoomData.status || "idle");
@@ -306,7 +400,7 @@ export default function MeetingDetailPage() {
       setNewTaskText("");
       setNewTaskAssignee("");
       setNewTaskDeadline("");
-      setSuccess("Action item assigned and tracked.");
+      setSuccess(`Action item assigned to ${created.assignee || "Unassigned"} and tracked.`);
     } catch (err: any) {
       setError(err?.message || "Failed to create task");
     } finally {
@@ -361,17 +455,28 @@ export default function MeetingDetailPage() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   }
 
+  function formatSummary(text: string) {
+    return text
+      .split(/\n+|(?<=[.!?])\s+(?=[A-Z])/)
+      .map((line) => line.replace(/^[-•*]\s*/, "").trim())
+      .filter(Boolean);
+  }
+
   function getAgentPresentation(state: string) {
+    const s = (state || "idle").toLowerCase();
     const states: Record<string, { label: string; badge: string }> = {
-      idle: { label: "Scheduled", badge: "badge-amber" },
-      joining: { label: "Joining...", badge: "badge-amber" },
-      listening: { label: "Live", badge: "badge-emerald" },
-      processing: { label: "Processing", badge: "badge-cyan" },
-      leaving: { label: "Disconnecting", badge: "badge-amber" },
+      idle: { label: "Idle / Scheduled", badge: "badge-indigo" },
+      joining: { label: "Joining Zoom...", badge: "badge-amber" },
+      listening: { label: "In Meeting & Listening", badge: "badge-emerald" },
+      in_meeting: { label: "In Meeting & Listening", badge: "badge-emerald" },
+      processing: { label: "Processing Transcript", badge: "badge-cyan" },
+      complete: { label: "Session Complete", badge: "badge-emerald" },
+      leaving: { label: "Disconnecting...", badge: "badge-amber" },
       stopped: { label: "Disconnected", badge: "badge-rose" },
-      failed_join: { label: "Failed - Retry", badge: "badge-rose" },
+      disconnected: { label: "Disconnected", badge: "badge-rose" },
+      failed_join: { label: "Failed Join - Retry", badge: "badge-rose" },
     };
-    return states[state] || { label: state.replaceAll("_", " "), badge: "badge-amber" };
+    return states[s] || { label: state.replaceAll("_", " "), badge: "badge-amber" };
   }
 
   if (loading) {
@@ -517,6 +622,12 @@ export default function MeetingDetailPage() {
           <span>📄</span>
           <span>Executive Summary</span>
         </button>
+        {currentUserRole === "admin" && (
+          <button className={`tab-btn ${activeTab === "insights" ? "active" : ""}`} onClick={() => setActiveTab("insights")}>
+            <span>◌</span>
+            <span>Insights</span>
+          </button>
+        )}
         <button
           className={`tab-btn ${activeTab === "decisions" ? "active" : ""}`}
           onClick={() => setActiveTab("decisions")}
@@ -550,7 +661,7 @@ export default function MeetingDetailPage() {
           onClick={() => setActiveTab("agent")}
         >
           <span>🤖</span>
-          <span>Zoom Bot Controller</span>
+          <span>Zoom Agent & Ava Voice</span>
         </button>
       </div>
 
@@ -583,10 +694,12 @@ export default function MeetingDetailPage() {
                   fontSize: 15,
                   whiteSpace: "pre-wrap",
                   border: "1px solid var(--border-subtle)",
-                  color: "#f8fafc",
+                  color: "var(--text-primary)",
                 }}
               >
-                {meeting.summary.text}
+                <ul style={{ display: "grid", gap: 12, paddingLeft: 20, margin: 0 }}>
+                  {formatSummary(meeting.summary.text).map((point, index) => <li key={index}>{point}</li>)}
+                </ul>
               </div>
             ) : (
               <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }}>
@@ -650,7 +763,7 @@ export default function MeetingDetailPage() {
                       ✓
                     </div>
                     <div style={{ flex: 1 }}>
-                      <p style={{ fontSize: 15, lineHeight: 1.5, color: "#f8fafc" }}>
+                      <p style={{ fontSize: 15, lineHeight: 1.5, color: "var(--text-primary)" }}>
                         {d.text}
                       </p>
                     </div>
@@ -754,7 +867,7 @@ export default function MeetingDetailPage() {
                             fontWeight: 500,
                             marginBottom: 4,
                             textDecoration: item.status === "done" ? "line-through" : "none",
-                            color: item.status === "done" ? "var(--text-muted)" : "#ffffff",
+                            color: item.status === "done" ? "var(--text-muted)" : "var(--text-primary)",
                           }}
                         >
                           {item.task}
@@ -793,6 +906,41 @@ export default function MeetingDetailPage() {
             ) : (
               <div style={{ textAlign: "center", padding: "50px 20px", color: "var(--text-muted)" }}>
                 <p style={{ fontSize: 14 }}>No action items recorded yet.</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "insights" && (
+          <div>
+            <div style={{ marginBottom: 20 }}>
+              <h3 style={{ fontSize: 18, marginBottom: 4 }}>Participation Insights</h3>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                Talk-time and engagement calculated from the timestamped transcript.
+              </span>
+            </div>
+            {insights?.participants.length ? (
+              <div style={{ display: "grid", gap: 12 }}>
+                {insights.participants.map((participant) => (
+                  <div key={participant.speaker} style={{ padding: 16, background: "var(--bg-input)", border: "1px solid var(--border-card)", borderRadius: "var(--radius-sm)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 10 }}>
+                      <strong>{getSpeakerDisplayName(participant.speaker)}</strong>
+                      <span className="badge badge-cyan">{participant.engagement_score}% engaged</span>
+                    </div>
+                    <div style={{ height: 8, background: "var(--border-subtle)", borderRadius: 4, overflow: "hidden", marginBottom: 9 }}>
+                      <div style={{ width: `${participant.talk_time_percent}%`, height: "100%", background: "var(--accent-primary)" }} />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)", fontSize: 12 }}>
+                      <span>{Math.round(participant.talk_time_seconds)}s speaking</span>
+                      <span>{participant.talk_time_percent}% of talk-time</span>
+                    </div>
+                    <p style={{ marginTop: 10, color: "var(--text-secondary)", fontSize: 13 }}>{participant.coaching_tip}</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }}>
+                Add a transcript with speaker timestamps to calculate insights.
               </div>
             )}
           </div>
@@ -930,7 +1078,7 @@ export default function MeetingDetailPage() {
                         [{formatTime(seg.start_time)} - {formatTime(seg.end_time)}]
                       </span>
                     </div>
-                    <p style={{ fontSize: 14, lineHeight: 1.6, color: "#f8fafc" }}>{seg.text}</p>
+                    <p style={{ fontSize: 14, lineHeight: 1.6, color: "var(--text-primary)" }}>{seg.text}</p>
                   </div>
                 ))}
               </div>
@@ -943,7 +1091,7 @@ export default function MeetingDetailPage() {
                   lineHeight: 1.7,
                   fontSize: 14,
                   whiteSpace: "pre-wrap",
-                  color: "#f8fafc",
+                  color: "var(--text-primary)",
                 }}
               >
                 {meeting.transcript}
@@ -1108,19 +1256,24 @@ export default function MeetingDetailPage() {
           </div>
         )}
 
-        {/* ZOOM AUTONOMOUS BOT CONTROLLER TAB */}
+        {/* ZOOM AUTONOMOUS BOT & AVA VOICE REPLY CONTROLLER TAB */}
         {activeTab === "agent" && (
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 22 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+            {/* Header & Status Bar */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
               <div>
-                <h3 style={{ fontSize: 18, marginBottom: 4 }}>Zoom Autonomous Meeting Bot</h3>
+                <h3 style={{ fontSize: 18, marginBottom: 4 }}>Zoom Agent & Ava Voice Reply Stream</h3>
                 <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                  Connect the autonomous AI bot to listen, transcribe, answer queries, and extract tasks.
+                  Autonomous RTMS bot + &quot;Ava&quot; wake-word voice answers generated via Piper/pyttsx3 TTS.
                 </p>
               </div>
 
-              <div>
-                <span className={`badge ${getAgentPresentation(agentState).badge}`}
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span className={`badge ${wsConnected ? "badge-emerald" : "badge-rose"}`}>
+                  {wsConnected ? "🟢 Live WS Connected" : "⚪ WS Disconnected"}
+                </span>
+                <span
+                  className={`badge ${getAgentPresentation(agentState).badge}`}
                   style={{ textTransform: "uppercase", padding: "6px 14px", fontSize: 13 }}
                 >
                   Bot Status: {getAgentPresentation(agentState).label}
@@ -1128,52 +1281,238 @@ export default function MeetingDetailPage() {
               </div>
             </div>
 
-            {/* Controller Card */}
+            {/* Ava Active Listening Banner */}
+            {(agentState.toLowerCase() === "listening" || agentState.toLowerCase() === "in_meeting") && (
+              <div
+                style={{
+                  background: "rgba(16, 185, 129, 0.12)",
+                  border: "1px solid rgba(16, 185, 129, 0.3)",
+                  borderRadius: "var(--radius-md)",
+                  padding: "14px 18px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  color: "#10b981",
+                  fontWeight: 600,
+                  fontSize: 14,
+                }}
+              >
+                <span className="spinner" style={{ borderColor: "#10b981", borderTopColor: "transparent", width: 20, height: 20 }} />
+                <span>🎤 Ava is actively listening in Zoom. Say &quot;Ava, what is the deployment status?&quot; to hear a voice reply!</span>
+              </div>
+            )}
+
+            {/* Top Banner Card: Test Ava Voice Reply */}
+            <div
+              style={{
+                background: "var(--bg-input)",
+                padding: 24,
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--border-card)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 16,
+              }}
+            >
+              <div>
+                <h4 style={{ fontSize: 16, color: "#fff", marginBottom: 4 }}>🗣️ Test Ava Voice Reply (TTS Engine)</h4>
+                <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                  Speak or ask a grounded question using the &quot;Ava&quot; wake-word. Ava will retrieve transcript RAG answers and synthesize audio using Piper/pyttsx3 TTS.
+                </p>
+              </div>
+
+              <form onSubmit={handleTestAvaReply} style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <input
+                  type="text"
+                  className="form-input"
+                  style={{ flex: 1, minWidth: 260, fontSize: 14 }}
+                  placeholder='Say something to Ava (e.g. "Ava, what are our key action items?")...'
+                  value={avaTestInput}
+                  onChange={(e) => setAvaTestInput(e.target.value)}
+                  disabled={testingAva}
+                />
+                <button type="submit" className="btn btn-primary btn-lg" disabled={testingAva || !avaTestInput.trim()}>
+                  {testingAva ? (
+                    <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span className="spinner" />
+                      <span>Synthesizing Voice...</span>
+                    </span>
+                  ) : (
+                    "🎙️ Speak to Ava"
+                  )}
+                </button>
+              </form>
+
+              {/* Voice Reply Stream list */}
+              <div>
+                <h5 style={{ fontSize: 14, color: "var(--text-primary)", marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span>🔊 Ava Voice Answers Stream</span>
+                  <span className="badge badge-indigo">{avaReplies.length} Replies</span>
+                </h5>
+
+                {avaReplies.length === 0 ? (
+                  <div
+                    style={{
+                      textAlign: "center",
+                      padding: "24px 16px",
+                      background: "var(--bg-card)",
+                      borderRadius: "var(--radius-sm)",
+                      border: "1px dashed var(--border-card)",
+                      color: "var(--text-muted)",
+                      fontSize: 13,
+                    }}
+                  >
+                    No voice answers generated yet. Type a question with &quot;Ava&quot; above and click &quot;Speak to Ava&quot;!
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 14, maxHeight: 360, overflowY: "auto" }}>
+                    {avaReplies.map((reply) => (
+                      <div
+                        key={reply.id}
+                        style={{
+                          background: "var(--bg-card)",
+                          border: "1px solid var(--border-card)",
+                          borderRadius: "var(--radius-md)",
+                          padding: 16,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 10,
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text-muted)" }}>
+                          <span className="badge badge-indigo">💬 Question: &quot;{reply.question}&quot;</span>
+                          <span>{reply.timestamp}</span>
+                        </div>
+                        
+                        <div style={{ background: "var(--bg-input)", padding: 12, borderRadius: "var(--radius-sm)", fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                          <strong style={{ color: "#10b981" }}>🤖 Ava Answer: </strong>
+                          {reply.answer}
+                        </div>
+
+                        {reply.audio_base64 && (
+                          <div style={{ marginTop: 4 }}>
+                            <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>
+                              🔊 Voice Audio (Piper/pyttsx3 Output):
+                            </label>
+                            <audio
+                              controls
+                              autoPlay
+                              src={`data:audio/wav;base64,${reply.audio_base64}`}
+                              style={{ width: "100%", height: 36 }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Bottom Card: Zoom Bot Controller */}
             <div
               style={{
                 background: "var(--bg-input)",
                 padding: 24,
                 borderRadius: "var(--radius-md)",
                 border: "1px solid var(--border-subtle)",
-                marginBottom: 20,
+                display: "flex",
+                flexDirection: "column",
+                gap: 16,
               }}
             >
-              <h4 style={{ fontSize: 15, marginBottom: 12, color: "#fff" }}>Launch Autonomous Agent Session</h4>
-              <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+              <h4 style={{ fontSize: 15, color: "#fff", marginBottom: 2 }}>🤖 Zoom Autonomous Bot Controller</h4>
+              <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                Launch the RTMS audio bot into your Zoom meeting room. The bot streams real-time audio, listens for the wake-word &quot;Ava&quot;, and generates spoken audio replies.
+              </p>
+
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
                 <input
                   type="text"
                   className="form-input"
                   style={{ flex: 1, minWidth: 280 }}
-                  placeholder="Zoom Meeting URL or ID (e.g. https://zoom.us/j/849203948)..."
+                  placeholder="e.g. https://zoom.us/j/849203948..."
                   value={zoomUrlOrId}
-                  onChange={(event) => setZoomUrlOrId(event.target.value)}
-                  disabled={agentBusy || agentState === "listening"}
+                  onChange={(e) => setZoomUrlOrId(e.target.value)}
+                  disabled={agentBusy || agentState.toLowerCase() === "listening" || agentState.toLowerCase() === "in_meeting"}
                 />
                 <button
                   type="button"
                   onClick={handleAgentToggle}
-                  className={`btn ${agentState === "listening" ? "btn-danger" : "btn-primary"}`}
+                  className={`btn ${
+                    agentState.toLowerCase() === "listening" || agentState.toLowerCase() === "in_meeting"
+                      ? "btn-danger"
+                      : "btn-primary"
+                  }`}
                   disabled={agentBusy}
                 >
                   {agentBusy ? (
-                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                       <span className="spinner" />
-                      <span>Processing...</span>
+                      <span>Communicating with Bot...</span>
                     </span>
-                  ) : agentState === "listening" ? (
-                    "Disconnect Agent"
+                  ) : agentState.toLowerCase() === "listening" || agentState.toLowerCase() === "in_meeting" ? (
+                    "Disconnect Bot from Zoom"
+                  ) : agentState.toLowerCase() === "stopped" || agentState.toLowerCase() === "failed_join" ? (
+                    "Retry Zoom Bot Join"
                   ) : (
-                    agentState === "stopped" || agentState === "left" ? "Retry Agent" : "Start Zoom Agent"
+                    "Launch Zoom Agent Bot"
                   )}
                 </button>
               </div>
 
-              <div style={{ background: "var(--accent-gradient-subtle)", border: "1px solid #c6e5d7", borderRadius: "var(--radius-sm)", padding: 14, fontSize: 13, lineHeight: 1.6, color: "var(--text-secondary)" }}>
-                <strong>Integration status:</strong> RTMS is a media stream, not a normal Zoom participant. Authorize the Zoom app first; after that, Zoom must deliver the RTMS lifecycle event before audio and transcription can begin.
+              <div
+                style={{
+                  background: "var(--bg-card)",
+                  border: "1px solid var(--border-card)",
+                  borderRadius: "var(--radius-sm)",
+                  padding: 14,
+                  fontSize: 12,
+                  lineHeight: 1.6,
+                  color: "var(--text-secondary)",
+                }}
+              >
+                <strong>OAuth Authorization Note:</strong> RTMS raw media audio stream requires an authorized Zoom Client ID.
+                <div style={{ marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={handleZoomAuthorize}
+                    disabled={zoomAuthorizing}
+                  >
+                    {zoomAuthorizing ? "Redirecting..." : "Authorize Zoom OAuth"}
+                  </button>
+                </div>
               </div>
-              <button type="button" className="btn btn-secondary btn-sm" onClick={handleZoomAuthorize} disabled={zoomAuthorizing} style={{ marginTop: 12 }}>
-                {zoomAuthorizing ? "Opening Zoom..." : "Authorize Zoom for RTMS"}
-              </button>
+
+              {/* Real-time WS Raw Transcript Stream */}
+              {liveTranscripts.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <h5 style={{ fontSize: 13, color: "var(--text-primary)", marginBottom: 8 }}>
+                    📡 Live RTMS Audio Stream Feed ({liveTranscripts.length})
+                  </h5>
+                  <div
+                    style={{
+                      background: "var(--bg-card)",
+                      padding: 12,
+                      borderRadius: "var(--radius-sm)",
+                      maxHeight: 180,
+                      overflowY: "auto",
+                      fontSize: 12,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                      border: "1px solid var(--border-card)",
+                    }}
+                  >
+                    {liveTranscripts.map((t, i) => (
+                      <div key={i} style={{ color: "var(--text-secondary)" }}>
+                        <strong style={{ color: "#a5b4fc" }}>[{t.timestamp}] {t.speaker}:</strong> {t.text}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

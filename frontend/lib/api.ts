@@ -68,6 +68,18 @@ export interface MeetingDetail extends Meeting {
   segments: Segment[];
 }
 
+export interface MeetingInsights {
+  meeting_id: number;
+  participants: Array<{
+    speaker: string;
+    talk_time_seconds: number;
+    talk_time_percent: number;
+    engagement_score: number;
+    coaching_tip: string;
+  }>;
+  sentiment: null;
+}
+
 export interface DashboardStats {
   total_meetings: number;
   total_tasks: number;
@@ -130,6 +142,27 @@ export interface NotificationItem {
   body?: string | null;
   read: boolean;
   created_at?: string | null;
+}
+
+export interface AdminUser {
+  id: number;
+  email: string;
+  full_name?: string | null;
+  role: "admin" | "employee" | string;
+  created_at?: string | null;
+  meeting_count: number;
+  task_count: number;
+}
+
+export interface VoiceReplyResult {
+  triggered?: boolean;
+  question: string;
+  answer: string;
+  audio_base64: string;
+  content_type: string;
+  timestamp: string;
+  has_audio?: boolean;
+  ws_clients_notified?: number;
 }
 
 export function getApiBase(): string {
@@ -227,6 +260,10 @@ export const api = {
 
   async getMeeting(id: number | string): Promise<MeetingDetail> {
     return apiRequest<MeetingDetail>(`/api/meetings/${id}`);
+  },
+
+  async getMeetingInsights(id: number | string): Promise<MeetingInsights> {
+    return apiRequest<MeetingInsights>(`/api/meetings/${id}/insights`);
   },
 
   async createMeeting(title: string, platform: string = "zoom"): Promise<Meeting> {
@@ -461,5 +498,34 @@ export const api = {
     return apiRequest<{ status: string }>("/api/agent/stop", {
       method: "POST",
     });
+  },
+
+  // Admin — Users list (admin only)
+  async getAdminUsers(): Promise<AdminUser[]> {
+    return apiRequest<AdminUser[]>("/api/auth/admin/users");
+  },
+
+  // Voice Reply — manual test (dev/prod)
+  async testVoiceReply(
+    meetingId: number | string,
+    text: string
+  ): Promise<VoiceReplyResult> {
+    return apiRequest<VoiceReplyResult>(
+      `/api/meetings/${meetingId}/voice-reply/test`,
+      {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      }
+    );
+  },
+
+  async getLatestVoiceReply(meetingId: number | string): Promise<{ meeting_id: number; reply: VoiceReplyResult | null }> {
+    return apiRequest(`/api/meetings/${meetingId}/voice-reply/latest`);
+  },
+
+  // Real-time WebSocket for meeting events (Ava replies, agent state, live transcript)
+  getMeetingWebSocketUrl(meetingId: number | string): string {
+    const base = getApiBase().replace(/^http/, "ws");
+    return `${base}/api/meetings/${meetingId}/ws`;
   },
 };

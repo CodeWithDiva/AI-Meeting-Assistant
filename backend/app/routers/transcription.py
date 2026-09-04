@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Meeting, TranscriptSegment, User
+from app.services.meeting_analysis import analyze_and_persist
 from app.schemas.transcription import TranscriptResponse
 from app.transcription.base import FasterWhisperService
 
@@ -121,6 +122,7 @@ async def _transcribe_upload(
 
         meeting.transcript = full_transcript
         db.commit()
+        await analyze_and_persist(meeting.id, db)
 
     return TranscriptResponse(
         filename=file.filename,

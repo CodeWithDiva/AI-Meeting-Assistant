@@ -28,6 +28,7 @@ from app.routers.tasks import router as tasks_router
 from app.routers.transcript import router as transcript_router
 from app.routers.transcription import router as transcription_router
 from app.routers.tts import router as tts_router
+from app.routers.voice_reply import router as voice_reply_router
 from app.routers.zoom import router as zoom_bot_router
 from app.database import Base, engine
 import app.models  # noqa: F401
@@ -63,6 +64,7 @@ app.include_router(search_router)
 app.include_router(chat_router)
 app.include_router(live_transcription_router)
 app.include_router(tts_router)
+app.include_router(voice_reply_router)
 app.include_router(zoom_bot_router)
 app.include_router(zoom_rtms_router, prefix="/api/integrations/zoom", tags=["zoom"])
 app.include_router(notifications_router)

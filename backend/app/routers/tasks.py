@@ -54,14 +54,34 @@ def create_task(
     db: Session = Depends(get_db),
 ) -> ActionItem:
     _owned_meeting(meeting_id, user, db)
+    assignee_user = None
+    if request.assignee:
+        assignee_user = db.scalar(
+            select(User).where(
+                (User.email.ilike(request.assignee))
+                | (User.full_name.ilike(request.assignee))
+            )
+        )
     item = ActionItem(
         meeting_id=meeting_id,
         assignee=request.assignee,
+        assignee_user_id=assignee_user.id if assignee_user else None,
         assigned_by=request.assigned_by,
         task=request.task,
         deadline=request.deadline,
     )
     db.add(item)
+    if assignee_user and assignee_user.id != user.id:
+        from app.models import Notification
+
+        db.add(Notification(
+            user_id=assignee_user.id,
+            meeting_id=meeting_id,
+            type="task_assigned",
+            title="New task assigned",
+            body=request.task + (f" · Due {request.deadline}" if request.deadline else ""),
+            read=False,
+        ))
     db.commit()
     db.refresh(item)
     return item

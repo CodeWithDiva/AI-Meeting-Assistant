@@ -1,13 +1,14 @@
 import os
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import create_access_token, get_current_user, hash_password, verify_password
 from app.database import get_db
-from app.models import User
+from app.models import ActionItem, Meeting, User
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -59,3 +60,33 @@ def token(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 @router.get("/me", response_model=UserResponse)
 def me(user: User = Depends(get_current_user)) -> User:
     return user
+
+
+@router.get("/admin/users", tags=["admin"])
+def list_all_users(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Admin-only: return all registered users with activity stats."""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    users = list(db.scalars(select(User).order_by(User.created_at.desc())))
+    result = []
+    for u in users:
+        meeting_count = db.scalar(
+            select(func.count(Meeting.id)).where(Meeting.owner_id == u.id)
+        ) or 0
+        task_count = db.scalar(
+            select(func.count(ActionItem.id)).where(ActionItem.assignee_user_id == u.id)
+        ) or 0
+        result.append({
+            "id": u.id,
+            "email": u.email,
+            "full_name": u.full_name,
+            "role": u.role,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "meeting_count": meeting_count,
+            "task_count": task_count,
+        })
+    return result
