@@ -1,4 +1,14 @@
-models:
-  - title: Qwen2.5 Coder
-    provider: ollama
-    model: qwen2.5-coder:7b
+{
+  "models": [
+    {
+      "title": "Ollama Model",
+      "provider": "ollama",
+      "model": "qwen2.5-coder"
+    }
+  ],
+  "tabAutocompleteModel": {
+    "title": "Ollama",
+    "provider": "ollama",
+    "model": "qwen2.5-coder"
+  }
+}
