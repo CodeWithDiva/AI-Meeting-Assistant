@@ -20,6 +20,7 @@ main.py mein register karna hoga:
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from typing import Any
@@ -29,6 +30,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 _rtms_pipelines: dict[str, Any] = {}
 
 ZOOM_CLIENT_ID = os.getenv("ZOOM_CLIENT_ID", "")
@@ -191,10 +193,13 @@ async def stream_audio_to_pipeline(
     """
     signature = generate_signature(meeting_uuid, rtms_stream_id)
     pipeline = None
+    voice_assistant = None
     if meeting_id is not None:
         from app.services.rtms_transcription import RTMSTranscriptionPipeline
+        from app.services.voice_assistant import AvaVoiceAssistant
 
         pipeline = RTMSTranscriptionPipeline(meeting_id)
+        voice_assistant = AvaVoiceAssistant(meeting_id)
         _rtms_pipelines[meeting_uuid] = pipeline
 
     async with websockets.connect(media_server_url) as media_ws:
@@ -212,7 +217,14 @@ async def stream_audio_to_pipeline(
             # Binary audio frames yahan aayenge (PCM 16-bit, 16kHz typically)
             if isinstance(message, bytes):
                 if pipeline:
-                    await pipeline.add_chunk(message)
+                    texts = await pipeline.add_chunk(message)
+                    for text in texts:
+                        reply = await voice_assistant.handle_transcript(text) if voice_assistant else None
+                        if reply:
+                            logger.info(
+                                "Ava prepared a voice reply for meeting %s; outbound RTMS audio adapter is required to publish it.",
+                                meeting_id,
+                            )
             else:
                 # JSON control messages (KEEP_ALIVE etc.)
                 msg = json.loads(message)
