@@ -1,4 +1,6 @@
-"""Router for managing Zoom Bot join/leave sessions with real-time agent state broadcasting."""
+"""Router for managing our own browser-based Zoom bot join/leave sessions,
+with real-time agent state broadcasting. Uses BrowserMeetingBot (Playwright +
+virtual audio cable) instead of Zoom RTMS — no Zoom Marketplace app needed."""
 
 import asyncio
 import logging
@@ -9,17 +11,19 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agents.browser_bot import BrowserMeetingBot
 from app.auth import get_current_user
 from app.database import get_db
-from app.integrations.zoom.agent import ZoomBotAgent
 from app.models import Meeting, User
 from app.services.ws_manager import ws_manager
 
 router = APIRouter(prefix="/api/zoom", tags=["zoom"])
 logger = logging.getLogger(__name__)
 
-# In-memory active zoom bots keyed by meeting_id
-_active_zoom_bots: dict[int, ZoomBotAgent] = {}
+# In-memory active meeting bots keyed by meeting_id.
+# BrowserMeetingBot joins the Zoom Web Client directly (no Zoom Marketplace
+# app, no RTMS) — see app/agents/browser_bot.py.
+_active_zoom_bots: dict[int, BrowserMeetingBot] = {}
 
 # Valid agent states (ordered lifecycle)
 AGENT_STATES = (
@@ -67,7 +71,7 @@ async def join_zoom_meeting(
 
     bot = _active_zoom_bots.get(meeting_id)
     if not bot or bot.status in ("left", "idle", "DISCONNECTED", "COMPLETE", "FAILED_JOIN"):
-        bot = ZoomBotAgent(meeting_id=meeting_id, user_id=user.id)
+        bot = BrowserMeetingBot(meeting_id=meeting_id, user_id=user.id)
         _active_zoom_bots[meeting_id] = bot
 
     # Announce JOINING state immediately

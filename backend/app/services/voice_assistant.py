@@ -2,13 +2,16 @@
 
 Full audio loop:
     Meeting audio (PCM)
-        → Whisper STT  (in RTMSTranscriptionPipeline)
+        → Whisper STT  (in RTMSTranscriptionPipeline, fed by any audio
+          source — Zoom RTMS *or* the browser bot's virtual mic capture)
         → AvaVoiceAssistant.handle_transcript()
             → wake-word "Ava" detected
             → LLM answer via _ask_llm()
             → TTS WAV via TTSService
-            → ws_manager.broadcast() → frontend audio player
-            → RTMS outbound stub (future Zoom publish)
+            → ws_manager.broadcast() → frontend audio player (always)
+            → on_audio_out(wav_bytes) → optional live voice publish
+              (e.g. BrowserMeetingBot plays it into the outbound virtual
+              audio cable so Zoom hears it as the bot's own mic)
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import base64
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Awaitable, Callable
 
 from sqlalchemy import select
 
@@ -27,6 +31,8 @@ from app.routers.chat import _ask_llm
 from app.services.tts import TTSService
 
 logger = logging.getLogger(__name__)
+
+AudioOutCallback = Callable[[bytes], Awaitable[None]]
 
 
 @dataclass
@@ -47,11 +53,14 @@ class AvaVoiceAssistant:
     # Multilingual wake-words — add more as needed
     wake_words = ("ava", "اوا", "ایوا")
 
-    def __init__(self, meeting_id: int) -> None:
+    def __init__(self, meeting_id: int, on_audio_out: AudioOutCallback | None = None) -> None:
         self.meeting_id = meeting_id
         self.tts = TTSService()
         self.last_reply: VoiceReply | None = None
         self._processing = False  # prevent concurrent replies
+        # Optional live-voice sink — e.g. BrowserMeetingBot._speak_reply, which
+        # plays the WAV into the outbound virtual audio cable so Zoom hears it.
+        self._on_audio_out = on_audio_out
 
     async def handle_transcript(self, text: str) -> VoiceReply | None:
         """
@@ -78,8 +87,8 @@ class AvaVoiceAssistant:
             # Broadcast to all connected frontend clients
             await self._broadcast_reply(reply)
 
-            # Stub: future Zoom RTMS outbound publish
-            await self._publish_to_rtms(reply)
+            # Live in-meeting voice, if a bot audio sink was wired up
+            await self._publish_audio_out(reply)
 
             return reply
         finally:
@@ -166,14 +175,21 @@ class AvaVoiceAssistant:
         except Exception as exc:
             logger.warning("[Ava] WebSocket broadcast failed: %s", exc)
 
-    async def _publish_to_rtms(self, reply: VoiceReply) -> None:
+    async def _publish_audio_out(self, reply: VoiceReply) -> None:
         """
-        STUB — future Zoom RTMS outbound audio injection.
-        When Zoom officially supports outbound PCM injection via RTMS SDK,
-        this method will send reply.audio_wav to the media WebSocket.
+        If a live audio sink was provided (BrowserMeetingBot's virtual-cable
+        playback), send Ava's WAV reply there so it's actually spoken inside
+        the meeting. Without a sink, this is a harmless no-op — matches the
+        old browser-only-read-aloud behaviour.
         """
-        logger.debug(
-            "[Ava] RTMS outbound stub: %d bytes of audio ready for meeting %d",
-            len(reply.audio_wav),
-            self.meeting_id,
-        )
+        if not self._on_audio_out:
+            logger.debug(
+                "[Ava] No live audio sink attached — %d bytes stayed browser-only for meeting %d",
+                len(reply.audio_wav),
+                self.meeting_id,
+            )
+            return
+        try:
+            await self._on_audio_out(reply.audio_wav)
+        except Exception:
+            logger.exception("[Ava] Failed to publish live audio reply for meeting %d", self.meeting_id)
