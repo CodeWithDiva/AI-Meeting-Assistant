@@ -278,6 +278,14 @@ class BrowserMeetingBot:
             locale="en-US",
             timezone_id="Asia/Karachi",
         )
+        if BOT_HEADLESS:
+            # Headless Chrome puts "HeadlessChrome" in its UA — an instant tell.
+            # (Headless can't use the real audio devices anyway; this is only a
+            # safety net for CI-style runs.)
+            context_opts["user_agent"] = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            )
 
         if BOT_CDP_URL:
             await self._attach_over_cdp(context_opts)

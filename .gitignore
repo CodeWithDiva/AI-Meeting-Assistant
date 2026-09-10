@@ -37,6 +37,9 @@ tmp/
 debug/
 .pytest_cache/
 
+# The meeting bot's persistent Chrome profile (cookies, logins, fingerprint)
+.bot-profile/
+
 # AI Models
 models/
 *.bin

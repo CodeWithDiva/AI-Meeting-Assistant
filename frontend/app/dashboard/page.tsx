@@ -23,6 +23,7 @@ export default function DashboardPage() {
   const [joinLink, setJoinLink] = useState("");
   const [joinTitle, setJoinTitle] = useState("");
   const [joinRecord, setJoinRecord] = useState(false);
+  const [joinMode, setJoinMode] = useState<"agent" | "attach">("agent");
   const [joining, setJoining] = useState(false);
   const [joinMessage, setJoinMessage] = useState("");
 
@@ -81,7 +82,15 @@ export default function DashboardPage() {
 
   async function handleSendAssistant(e: FormEvent) {
     e.preventDefault();
-    if (!joinLink.trim() || joining) return;
+    if (joining) return;
+    if (joinMode === "agent" && !joinLink.trim()) {
+      setError("Bot ke join karne ke liye Zoom/Meet link chahiye. Ya 'I'll join' choose karein.");
+      return;
+    }
+    if (joinMode === "attach" && !joinLink.trim() && !joinTitle.trim()) {
+      setError("Meeting ka title likhein (attach mode me link optional hai).");
+      return;
+    }
 
     setJoining(true);
     setError("");
@@ -90,10 +99,10 @@ export default function DashboardPage() {
       const result = await api.sendAgentToMeeting(joinLink.trim(), {
         title: joinTitle.trim() || undefined,
         record: joinRecord,
+        mode: joinMode,
       });
       setJoinLink("");
       setJoinTitle("");
-      // The join continues in the background — the meeting page shows it live.
       setJoinMessage(result.message);
       router.push(`/meetings/${result.meeting_id}`);
     } catch (err: any) {
@@ -197,16 +206,50 @@ export default function DashboardPage() {
       <div className="launch-card">
         <span className="eyebrow">MEETING ASSISTANT</span>
         <h2>Send the assistant to a meeting</h2>
+
+        <div className="mode-toggle" role="tablist" aria-label="How the assistant joins">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={joinMode === "agent"}
+            className={joinMode === "agent" ? "is-on" : ""}
+            onClick={() => setJoinMode("agent")}
+            disabled={joining}
+          >
+            Assistant joins as a participant
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={joinMode === "attach"}
+            className={joinMode === "attach" ? "is-on" : ""}
+            onClick={() => setJoinMode("attach")}
+            disabled={joining}
+          >
+            I&apos;ll join — assistant just listens
+          </button>
+        </div>
+
         <p className="launch-sub">
-          Paste a Zoom or Google Meet link. It joins as a participant, transcribes Urdu and
-          English, then writes the notes, decisions and tasks when it leaves.
+          {joinMode === "agent" ? (
+            <>Paste a Zoom or Google Meet link. The assistant opens the meeting in its own
+            browser, joins as a participant, and transcribes Urdu and English.</>
+          ) : (
+            <>You join the meeting in your normal Zoom/Meet app. The assistant does not join —
+            it listens through your audio device and still writes the notes, decisions and
+            tasks. Needs the virtual audio cable set up (see docs).</>
+          )}
         </p>
 
         <form onSubmit={handleSendAssistant} className="launch-row">
           <input
             type="text"
             className="form-input"
-            placeholder="https://zoom.us/j/1234567890  ·  https://meet.google.com/abc-defg-hij"
+            placeholder={
+              joinMode === "agent"
+                ? "https://zoom.us/j/1234567890  ·  https://meet.google.com/abc-defg-hij"
+                : "Meeting link (optional — only used for the title)"
+            }
             value={joinLink}
             onChange={(e) => setJoinLink(e.target.value)}
             disabled={joining}
@@ -216,20 +259,20 @@ export default function DashboardPage() {
             type="text"
             className="form-input"
             style={{ flex: "0 1 200px", minWidth: 160 }}
-            placeholder="Title (optional)"
+            placeholder={joinMode === "attach" ? "Title (required)" : "Title (optional)"}
             value={joinTitle}
             onChange={(e) => setJoinTitle(e.target.value)}
             disabled={joining}
             aria-label="Meeting title"
           />
-          <button type="submit" className="btn btn-primary btn-lg" disabled={joining || !joinLink.trim()}>
+          <button type="submit" className="btn btn-primary btn-lg" disabled={joining}>
             {joining ? (
               <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span className="spinner" />
                 <span>Sending…</span>
               </span>
             ) : (
-              <span>Join meeting</span>
+              <span>{joinMode === "agent" ? "Join meeting" : "Start listening"}</span>
             )}
           </button>
         </form>

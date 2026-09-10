@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import queue
+import threading
 from typing import AsyncIterator
 
 logger = logging.getLogger(__name__)
@@ -165,28 +166,74 @@ def resample_pcm16(pcm_data: bytes, src_rate: int, dst_rate: int) -> bytes:
     return converted.astype(np.int16).tobytes()
 
 
-class MicCaptureStream:
-    """Continuously records PCM16 mono audio from a named input device."""
+def _to_mono_16k(pcm: bytes, channels: int, src_rate: int, dst_rate: int) -> bytes:
+    """Downmix interleaved PCM16 to mono, then resample to the target rate."""
+    if channels > 1:
+        import numpy as np
 
-    def __init__(self, device_name: str | None, sample_rate: int = SAMPLE_RATE) -> None:
+        usable = len(pcm) - (len(pcm) % (2 * channels))
+        frames = np.frombuffer(pcm[:usable], dtype=np.int16).reshape(-1, channels)
+        pcm = frames.mean(axis=1).astype(np.int16).tobytes()
+    return resample_pcm16(pcm, src_rate, dst_rate)
+
+
+class MicCaptureStream:
+    """Continuously records PCM16 mono audio from a device.
+
+    Two capture modes:
+
+    * ``loopback=False`` (default) — record from an *input* device, e.g. a
+      virtual audio cable's recording side.
+    * ``loopback=True`` — WASAPI loopback capture of an *output* device: record
+      whatever is being played through the speakers/headphones the user already
+      listens on, with no rerouting. This is what "attach mode" uses so the
+      user does not have to change their Windows or Zoom audio settings.
+
+    With ``loopback=True`` and ``mix_mic=True``, the user's own microphone is
+    captured as well and summed in — loopback alone only carries the *other*
+    participants (your own voice is never played back to you), so without this
+    a solo speaker records as silence.
+    """
+
+    def __init__(
+        self,
+        device_name: str | None,
+        sample_rate: int = SAMPLE_RATE,
+        *,
+        loopback: bool = False,
+        mix_mic: bool = False,
+        mic_device: str | None = None,
+    ) -> None:
         self.device_name = device_name or None
+        self.loopback = loopback
+        self.mix_mic = mix_mic and loopback
+        self.mic_device = mic_device or None
         self.device_index: int | None = None
         # What the pipeline receives. `capture_rate` is what the hardware
         # actually runs at, which may differ.
         self.sample_rate = sample_rate
         self.capture_rate = sample_rate
+        self._capture_channels = CHANNELS
         self._stream = None
+        self._mic_stream = None
         self._queue: "queue.Queue[bytes]" = queue.Queue()
+        self._mic_queue: "queue.Queue[bytes]" = queue.Queue()
         self._running = False
 
     def start(self) -> None:
-        """Open the input stream on the configured device.
+        """Open the capture stream on the configured device.
 
-        Raises rather than falling back to the default microphone: recording
-        the wrong device is worse than not recording, because the meeting would
-        appear to work while producing a transcript of the wrong room.
+        Raises rather than falling back to a default device: recording the
+        wrong source is worse than not recording, because the meeting would
+        appear to work while producing a transcript of the wrong audio.
         """
         import sounddevice as sd  # lazy import — optional dependency
+
+        if self.loopback:
+            self._start_loopback(sd)
+            if self.mix_mic:
+                self._start_mic_input(sd)
+            return
 
         self.device_index = resolve_device(
             self.device_name, want_input=True, samplerate=self.sample_rate
@@ -218,6 +265,136 @@ class MicCaptureStream:
             f", resampled to {self.sample_rate} Hz" if self.capture_rate != self.sample_rate else "",
         )
 
+    def _start_mic_input(self, sd) -> None:  # noqa: ANN001
+        """Capture the user's own microphone alongside the loopback stream.
+
+        Failure here is non-fatal: loopback (the other participants) still
+        works, we just won't have the user's own voice.
+        """
+        try:
+            index = resolve_device(self.mic_device, want_input=True) if self.mic_device else None
+            info = sd.query_devices(index if index is not None else sd.default.device[0])
+            mic_rate = int(info["default_samplerate"] or self.sample_rate)
+
+            def _cb(indata, frames, time_info, status) -> None:  # noqa: ANN001
+                self._mic_queue.put(resample_pcm16(bytes(indata), mic_rate, self.sample_rate))
+
+            self._mic_stream = sd.RawInputStream(
+                samplerate=mic_rate,
+                channels=1,
+                dtype="int16",
+                blocksize=int(mic_rate * BLOCK_MS / 1000),
+                device=index,
+                callback=_cb,
+            )
+            self._mic_stream.start()
+            logger.info(
+                "Also capturing your microphone ('%s') for attach mode.", info["name"]
+            )
+        except Exception:
+            logger.warning(
+                "Could not open the microphone for attach mode — only the other "
+                "participants' audio will be transcribed.", exc_info=True,
+            )
+            self._mic_stream = None
+
+    def _start_loopback(self, sd) -> None:  # noqa: ANN001
+        """Record the system's playback via WASAPI loopback — no rerouting.
+
+        Captures exactly what the user hears (their meeting audio) straight off
+        the output device, so no Windows or Zoom audio setting has to change.
+        Uses the `soundcard` library, which exposes WASAPI loopback across
+        sounddevice versions. Audio is downmixed to mono and resampled to the
+        pipeline's 16 kHz.
+        """
+        try:
+            import soundcard as sc
+        except ModuleNotFoundError as exc:
+            raise DeviceNotFoundError(
+                "Loopback capture needs the 'soundcard' package "
+                "(pip install soundcard), or set BOT_CAPTURE_MODE=cable."
+            ) from exc
+
+        loopback_mics = [m for m in sc.all_microphones(include_loopback=True) if m.isloopback]
+        if not loopback_mics:
+            raise DeviceNotFoundError("No WASAPI loopback device is available.")
+
+        mic = None
+        if self.device_name:
+            wanted = self.device_name.strip().casefold()
+            mic = next(
+                (m for m in loopback_mics if m.name.strip().casefold() == wanted),
+                next((m for m in loopback_mics if wanted in m.name.casefold()), None),
+            )
+            if mic is None:
+                raise DeviceNotFoundError(
+                    f"No loopback device matches {self.device_name!r}. Available: "
+                    + ", ".join(m.name for m in loopback_mics)
+                )
+        else:
+            # Default: loop back the current default speaker — what the user hears.
+            try:
+                default_name = sc.default_speaker().name.strip().casefold()
+                mic = next(
+                    (m for m in loopback_mics if default_name in m.name.casefold()), None
+                )
+            except Exception:
+                mic = None
+            mic = mic or loopback_mics[0]
+
+        self._sc_mic = mic
+        self.capture_rate = self.sample_rate  # soundcard resamples for us
+        self._capture_channels = 1
+        self._running = True
+        self._sc_thread = threading.Thread(
+            target=self._loopback_loop, name="loopback-capture", daemon=True
+        )
+        self._sc_thread.start()
+        logger.info("Loopback capture started on '%s'.", mic.name)
+
+    def _loopback_loop(self) -> None:
+        """Blocking soundcard recorder → resampled mono PCM16 into the queue."""
+        import warnings
+
+        import numpy as np
+
+        # soundcard talks to WASAPI through COM, which must be initialised on
+        # whatever thread uses it — this one.
+        try:
+            import comtypes
+
+            comtypes.CoInitialize()
+            _com = True
+        except Exception:
+            _com = False
+
+        # soundcard warns on every buffer gap; in a long meeting that is noise.
+        warnings.filterwarnings("ignore", message="data discontinuity in recording")
+
+        # Record in ~0.5 s blocks (fewer WASAPI round-trips = fewer gaps), then
+        # hand the pipeline its usual small chunks.
+        block = int(self.sample_rate * 0.5)
+        emit = int(self.sample_rate * BLOCK_MS / 1000) * 2  # bytes per pipeline chunk
+        try:
+            with self._sc_mic.recorder(samplerate=self.sample_rate, channels=1) as rec:
+                buf = bytearray()
+                while self._running:
+                    data = rec.record(numframes=block)  # float32 (frames, 1)
+                    mono = np.clip(data[:, 0] * 32767.0, -32768, 32767).astype(np.int16)
+                    buf.extend(mono.tobytes())
+                    while len(buf) >= emit:
+                        self._queue.put(bytes(buf[:emit]))
+                        del buf[:emit]
+        except Exception:
+            logger.exception("Loopback capture loop crashed")
+            self._running = False
+        finally:
+            if _com:
+                try:
+                    comtypes.CoUninitialize()
+                except Exception:
+                    pass
+
     def _pick_capture_rate(self, sd) -> int:  # noqa: ANN001
         """Use the requested rate if the endpoint accepts it, else its native one.
 
@@ -236,24 +413,57 @@ class MicCaptureStream:
 
     def stop(self) -> None:
         self._running = False
-        if self._stream is not None:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                logger.exception("Error while stopping mic capture stream")
-            self._stream = None
+        thread = getattr(self, "_sc_thread", None)
+        if thread is not None:
+            thread.join(timeout=2.0)
+            self._sc_thread = None
+        for stream in (self._stream, self._mic_stream):
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    logger.exception("Error while stopping a capture stream")
+        self._stream = self._mic_stream = None
         logger.info("Mic capture stopped")
 
     async def chunks(self) -> AsyncIterator[bytes]:
-        """Async-yield PCM16 mono chunks until stop() is called."""
+        """Async-yield PCM16 mono chunks until stop() is called.
+
+        In mixed mode, each loopback chunk (the other participants) is summed
+        with any microphone audio (the user) that arrived alongside it, so a
+        single transcript carries both sides of the conversation.
+        """
         loop = asyncio.get_event_loop()
         while self._running:
             try:
                 chunk = await loop.run_in_executor(None, self._queue.get, True, 0.5)
             except queue.Empty:
                 continue
+            if self.mix_mic:
+                chunk = self._mix_in_mic(chunk)
             yield chunk
+
+    def _mix_in_mic(self, loopback_chunk: bytes) -> bytes:
+        """Sum the user's mic audio into a loopback chunk, clamping to int16."""
+        import numpy as np
+
+        mic = bytearray()
+        want = len(loopback_chunk)
+        while len(mic) < want:
+            try:
+                mic.extend(self._mic_queue.get_nowait())
+            except queue.Empty:
+                break
+        if not mic:
+            return loopback_chunk
+
+        n = min(want, len(mic))
+        a = np.frombuffer(loopback_chunk[:n], dtype=np.int16).astype(np.int32)
+        b = np.frombuffer(bytes(mic[:n]), dtype=np.int16).astype(np.int32)
+        mixed = np.clip(a + b, -32768, 32767).astype(np.int16)
+        # Keep any loopback tail beyond what the mic covered.
+        return mixed.tobytes() + loopback_chunk[n:]
 
 
 def play_wav_bytes(wav_bytes: bytes, device_name: str | None) -> None:

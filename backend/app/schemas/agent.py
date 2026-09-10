@@ -21,17 +21,25 @@ AgentState = Literal[
 
 
 class AgentJoinRequest(BaseModel):
-    """Everything needed to send the assistant into a meeting: a link."""
+    """Send the assistant into a meeting.
 
-    link: str = Field(
-        ...,
-        min_length=4,
-        description="Zoom or Google Meet link, or a bare Zoom ID / Meet code.",
+    ``mode="agent"`` — the browser bot joins the meeting itself; needs `link`.
+    ``mode="attach"`` — you join the meeting in your own client and the
+    assistant only listens through the capture device; `link` is optional
+    (used just for the title), so `title` is required when it is omitted.
+    """
+
+    mode: Literal["agent", "attach"] = "agent"
+    link: str | None = Field(
+        default=None,
+        description="Zoom or Google Meet link, or a bare Zoom ID / Meet code. "
+        "Required for mode='agent'.",
     )
     title: str | None = Field(
         default=None,
         max_length=200,
-        description="Meeting title. Derived from the link when omitted.",
+        description="Meeting title. Derived from the link when omitted; required "
+        "for mode='attach' without a link.",
     )
     record: bool = Field(
         default=False,

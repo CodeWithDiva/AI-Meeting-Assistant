@@ -30,6 +30,18 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "small"
 
+# If the configured model can't be loaded (usually out of memory on a busy CPU
+# box — `small` needs noticeably more RAM than `base`), fall back down this chain
+# rather than failing the whole request.
+_MODEL_FALLBACKS = {
+    "large-v3": "medium",
+    "large-v2": "medium",
+    "large": "medium",
+    "medium": "small",
+    "small": "base",
+    "base": "tiny",
+}
+
 # Whisper emits these on silence/noise rather than admitting it heard nothing.
 # Matched against the whole normalized segment, so real sentences that merely
 # contain "thank you" are unaffected.
@@ -141,15 +153,41 @@ class FasterWhisperService:
                 "python -m pip install faster-whisper"
             ) from error
 
-        if self._model is None:
-            logger.info("Loading faster-whisper model %r on CPU...", self.model_size)
-            self._model = WhisperModel(
-                self.model_size,
-                device="cpu",
-                compute_type="int8",
-                cpu_threads=int(os.getenv("WHISPER_CPU_THREADS", "4")),
-            )
-        return self._model
+        if self._model is not None:
+            return self._model
+
+        threads = int(os.getenv("WHISPER_CPU_THREADS", "4"))
+        tried: list[str] = []
+        size = self.model_size
+        while size and size not in tried:
+            tried.append(size)
+            try:
+                logger.info("Loading faster-whisper model %r on CPU...", size)
+                self._model = WhisperModel(
+                    size, device="cpu", compute_type="int8", cpu_threads=threads
+                )
+                if size != self.model_size:
+                    logger.warning(
+                        "Loaded Whisper %r instead of %r (the configured model would "
+                        "not load — likely low memory). Transcription quality, "
+                        "especially for Urdu, will be lower.",
+                        size, self.model_size,
+                    )
+                self.model_size = size
+                return self._model
+            except (RuntimeError, MemoryError, OSError) as error:
+                fallback = _MODEL_FALLBACKS.get(size)
+                if not fallback:
+                    raise RuntimeError(
+                        f"Could not load any faster-whisper model (last tried {size!r}): "
+                        f"{error}"
+                    ) from error
+                logger.warning(
+                    "Whisper model %r failed to load (%s) — trying %r.",
+                    size, error, fallback,
+                )
+                size = fallback
+        raise RuntimeError("Could not load a faster-whisper model.")
 
     async def transcribe(
         self,

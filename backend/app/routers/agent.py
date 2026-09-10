@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.agents import bot_runtime
 from app.agents.browser_bot import BrowserMeetingBot
+from app.agents.capture_session import CaptureSession
 from app.agents.meeting_link import UnsupportedMeetingLinkError, parse_meeting_link
 from app.auth import get_current_user
 from app.database import SessionLocal, get_db
@@ -35,10 +36,12 @@ from app.services.ws_manager import ws_manager
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 logger = logging.getLogger(__name__)
 
-# Live bots keyed by meeting_id. In-memory on purpose: a bot owns a browser
-# process belonging to this worker, so it cannot outlive it or be shared.
-_active_bots: dict[int, BrowserMeetingBot] = {}
-# Join failures, kept so /status can explain a bot that never appeared.
+# Live sessions keyed by meeting_id — either a browser bot or an attach-mode
+# capture session. In-memory on purpose: each owns OS resources (a browser
+# process, an audio stream) that belong to this worker.
+_Session = BrowserMeetingBot | CaptureSession
+_active_bots: dict[int, _Session] = {}
+# Join failures, kept so /status can explain a session that never appeared.
 _join_errors: dict[int, str] = {}
 
 
@@ -68,17 +71,33 @@ async def join_meeting(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AgentJoinResponse:
-    """Create a meeting from a pasted link and send the assistant into it."""
-    try:
-        link = parse_meeting_link(request.link)
-    except UnsupportedMeetingLinkError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+    """Create a meeting and start the assistant — as a bot, or in attach mode."""
+    link = None
+    if request.link and request.link.strip():
+        try:
+            link = parse_meeting_link(request.link)
+        except UnsupportedMeetingLinkError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
-    title = (request.title or "").strip() or link.display_title
+    if request.mode == "agent" and link is None:
+        raise HTTPException(
+            status_code=400,
+            detail="A Zoom or Google Meet link is required to send the bot in. "
+            "Use mode='attach' to have the assistant only listen while you join yourself.",
+        )
+
+    title = (request.title or "").strip() or (link.display_title if link else "")
+    if not title:
+        raise HTTPException(
+            status_code=400,
+            detail="A meeting title is required when no link is given.",
+        )
+
+    platform = link.platform if link else "attach"
     meeting = Meeting(
         owner_id=user.id,
         title=title,
-        platform=link.platform,
+        platform=platform,
         scheduled_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(meeting)
@@ -96,10 +115,23 @@ async def join_meeting(
     db.refresh(meeting)
 
     _join_errors.pop(meeting.id, None)
+
+    if request.mode == "attach":
+        session = CaptureSession(meeting_id=meeting.id, user_id=user.id)
+        _active_bots[meeting.id] = session
+        asyncio.create_task(_start_capture_in_background(session))
+        return AgentJoinResponse(
+            meeting_id=meeting.id,
+            platform="attach",
+            state="JOINING",
+            title=title,
+            recording_enabled=request.record,
+            message="Join the meeting in your own client — the assistant is listening.",
+        )
+
     bot = BrowserMeetingBot(meeting_id=meeting.id, user_id=user.id)
     _active_bots[meeting.id] = bot
     asyncio.create_task(_join_in_background(bot, link.join_url))
-
     return AgentJoinResponse(
         meeting_id=meeting.id,
         platform=link.platform,
@@ -108,6 +140,21 @@ async def join_meeting(
         recording_enabled=request.record,
         message=f"Assistant is joining the {link.platform.replace('_', ' ')} meeting.",
     )
+
+
+async def _start_capture_in_background(session: CaptureSession) -> None:
+    """Open the capture device and report the outcome over the WS channel."""
+    meeting_id = session.meeting_id
+    await _broadcast(meeting_id, "JOINING")
+    try:
+        result = await session.start()
+        await _broadcast(meeting_id, "IN_MEETING", {"simulated": result.get("simulated", False)})
+        logger.info("Attach-mode capture started for meeting %d.", meeting_id)
+    except Exception as exc:
+        message = str(exc)
+        _join_errors[meeting_id] = message
+        logger.error("Attach-mode capture failed for meeting %d: %s", meeting_id, message)
+        await _broadcast(meeting_id, "FAILED_JOIN", {"error": message})
 
 
 @router.post("/join/{meeting_id}", response_model=AgentJoinResponse, status_code=202)
@@ -199,7 +246,12 @@ async def leave_meeting(
         )
 
     await _broadcast(meeting_id, "PROCESSING")
-    result = await bot_runtime.run(bot.leave_meeting())
+    # The browser bot lives on the dedicated Playwright loop; the attach-mode
+    # capture session lives on this (server) loop. Finalize each on its own loop.
+    if isinstance(bot, BrowserMeetingBot):
+        result = await bot_runtime.run(bot.leave_meeting())
+    else:
+        result = await bot.leave_meeting()
     await _broadcast(meeting_id, "COMPLETE", result.get("notes") or {})
     return AgentLeaveResponse(
         meeting_id=meeting_id,

@@ -7,7 +7,9 @@ the same way a person on a locked-down laptop would.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
 import re
 from typing import Any
 
@@ -20,6 +22,23 @@ from app.agents.platforms.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _human_type(locator: Any, text: str) -> None:
+    """Fill a field the way a person would — focus, then key-by-key with jitter.
+
+    Zoom's bot check watches for fields that get their value set instantly.
+    """
+    try:
+        await locator.click()
+    except Exception:
+        pass
+    await asyncio.sleep(random.uniform(0.15, 0.35))
+    try:
+        await locator.press_sequentially(text, delay=random.uniform(60, 130))
+    except Exception:
+        await locator.fill(text)
+
 
 # Zoom renames these classes often, so name/role matching leads and CSS is only
 # a fallback.
@@ -75,23 +94,20 @@ class ZoomJoinStrategy:
                 return
             raise JoinFailedError(await self._diagnose(page))
 
+        await asyncio.sleep(random.uniform(0.8, 1.6))  # a human reads the page first
+
         if password:
             passcode = frame.locator(
                 "input#inputpasscode, input[name='inputpasscode'], input[type='password']"
             )
             try:
                 if await passcode.first.is_visible():
-                    await passcode.first.fill(password)
+                    await _human_type(passcode.first, password)
             except Exception:
                 pass
 
-        await name_field.fill(display_name)
-
-        # Zoom's anti-bot check flips the primary button to "Sign in to join" and
-        # shows a warning banner. A guest bot cannot get past that.
-        blocked = await self._detect_bot_block(frame)
-        if blocked:
-            raise JoinFailedError(blocked)
+        await _human_type(name_field, display_name)
+        await asyncio.sleep(random.uniform(0.4, 0.9))
 
         join_btn = await find_first_visible(
             frame,
@@ -104,12 +120,25 @@ class ZoomJoinStrategy:
             ],
             timeout_ms=10_000,
         )
+        # Hover then click, with a beat between — an instant programmatic click
+        # is itself one of the signals Zoom's bot check looks for.
         if join_btn:
+            try:
+                await join_btn.hover()
+                await asyncio.sleep(random.uniform(0.2, 0.5))
+            except Exception:
+                pass
             await join_btn.click()
         else:
             await name_field.press("Enter")
 
-        # After clicking, the bot check can still fire on the next screen.
+        # If the profile is signed into Zoom, "Sign in to join" leads to the
+        # meeting; give that redirect time before deciding it failed.
+        await asyncio.sleep(random.uniform(2.5, 4.0))
+        if await self._is_inside(page):
+            await self._settle_in(page)
+            return
+
         blocked = await self._detect_bot_block(page)
         if blocked:
             raise JoinFailedError(blocked)
@@ -125,21 +154,17 @@ class ZoomJoinStrategy:
 
         if "automated bots aren't allowed" in text or "automated bots are not allowed" in text:
             return (
-                "Zoom flagged the assistant's browser as an automated bot and blocked "
-                "the join. Fixes: (1) in the Zoom web portal turn OFF Settings → "
-                "Security → 'Only authenticated users can join', and disable 'Waiting "
-                "Room' or admit the assistant manually; (2) set BOT_BROWSER_PROFILE_DIR "
-                "to a Chrome profile that is signed into a Zoom account; (3) test with "
-                "Google Meet, which allows guest bots. Nothing in the code can bypass "
-                "a meeting that requires sign-in."
+                "Zoom blocked the join with \"automated bots aren't allowed\". This "
+                "browser profile is not signed into Zoom. One-time setup: start Chrome "
+                "with  --remote-debugging-port=9222  --user-data-dir=\"C:\\zoom-bot\" , "
+                "sign into zoom.us in that window, leave it open, and set "
+                "BOT_CDP_URL=http://localhost:9222 in .env. The assistant will then "
+                "join through that signed-in Chrome. (A screenshot is in backend/debug/.)"
             )
-        if "this meeting is for authorized" in text or (
-            "sign in to join" in text and "your name" not in text
-        ):
+        if "this meeting is for authorized attendees only" in text:
             return (
-                "This Zoom meeting requires a signed-in Zoom account. Set "
-                "BOT_BROWSER_PROFILE_DIR to a Chrome profile logged into Zoom, or ask "
-                "the host to allow guests."
+                "The host restricted this meeting to specific Zoom accounts. The "
+                "assistant's Zoom account must be on the invite list."
             )
         return None
 

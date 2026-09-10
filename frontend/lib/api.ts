@@ -500,10 +500,22 @@ export const api = {
   // Meeting agent — paste a link and the assistant joins.
   // The join runs in the background; watch `agent_state` on the meeting
   // WebSocket for JOINING → IN_MEETING → PROCESSING → COMPLETE.
-  async sendAgentToMeeting(link: string, options: { title?: string; record?: boolean } = {}): Promise<AgentJoinResult> {
+  //
+  // mode "agent"  — the browser bot joins the meeting itself (needs a link).
+  // mode "attach" — you join the meeting in your own app; the assistant only
+  //                 listens through the capture device (link optional, title used).
+  async sendAgentToMeeting(
+    link: string,
+    options: { title?: string; record?: boolean; mode?: "agent" | "attach" } = {}
+  ): Promise<AgentJoinResult> {
     return apiRequest<AgentJoinResult>("/api/agent/join", {
       method: "POST",
-      body: JSON.stringify({ link, title: options.title, record: options.record ?? false }),
+      body: JSON.stringify({
+        mode: options.mode ?? "agent",
+        link: link || undefined,
+        title: options.title,
+        record: options.record ?? false,
+      }),
     });
   },
 
