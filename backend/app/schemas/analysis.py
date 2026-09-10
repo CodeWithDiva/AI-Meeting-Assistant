@@ -4,7 +4,9 @@ from pydantic import BaseModel, Field
 
 
 class ActionItem(BaseModel):
-    assignee: str = "Unassigned"
+    # Null when the transcript assigned a task without naming an owner. The
+    # analyzer deliberately reports that rather than guessing a person.
+    assignee: str | None = None
     assigned_by: str | None = None
     task: str
     deadline: str | None = None

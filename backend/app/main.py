@@ -1,18 +1,23 @@
-"""FastAPI application entry point."""
+"""FastAPI application entry point.
 
-import hashlib
-import hmac
-import json
+The assistant joins meetings through its own browser agent
+(`app.agents.browser_bot`), so there is no Zoom Marketplace app, no OAuth
+handshake and no RTMS webhook anywhere in this service. The only meeting-facing
+API is `/api/agent`, which takes a pasted link.
+"""
+
+import asyncio
+import logging
 import os
-import time
-from urllib.parse import urlencode
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
-import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.services.ws_manager import ws_manager
 
 from app.routers.agent import router as agent_router
 from app.routers.analysis import router as analysis_router
@@ -29,17 +34,31 @@ from app.routers.transcript import router as transcript_router
 from app.routers.transcription import router as transcription_router
 from app.routers.tts import router as tts_router
 from app.routers.voice_reply import router as voice_reply_router
-from app.routers.zoom import router as zoom_bot_router
 from app.database import Base, engine
 import app.models  # noqa: F401
-from app.integrations.zoom_rtms import router as zoom_rtms_router
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Record the server's event loop so broadcasts fired from the meeting-bot
+    # loop thread can be marshalled back onto it.
+    ws_manager.bind_loop(asyncio.get_running_loop())
+    yield
+
+
 app = FastAPI(
     title="AI Meeting Assistant API",
-    version="1.0.0",
-    description="Backend API for the AI Meeting Assistant — Complete System.",
+    version="2.0.0",
+    description=(
+        "Backend for the AI Meeting Assistant. Paste a Zoom or Google Meet link "
+        "and the assistant joins, transcribes (Urdu + English), takes notes, "
+        "extracts decisions, and assigns tasks."
+    ),
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -65,22 +84,17 @@ app.include_router(chat_router)
 app.include_router(live_transcription_router)
 app.include_router(tts_router)
 app.include_router(voice_reply_router)
-app.include_router(zoom_bot_router)
-app.include_router(zoom_rtms_router, prefix="/api/integrations/zoom", tags=["zoom"])
 app.include_router(notifications_router)
 app.include_router(tasks_router)
 app.include_router(analysis_router)
 app.include_router(agent_router)
 
+
 @app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    import logging
-    from fastapi.responses import JSONResponse
-    logging.exception("Unhandled error on %s: %s", request.url.path, exc)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": f"Server error: {str(exc)}"},
-    )
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled error on %s: %s", request.url.path, exc)
+    return JSONResponse(status_code=500, content={"detail": f"Server error: {exc}"})
+
 
 Base.metadata.create_all(bind=engine)
 
@@ -91,9 +105,9 @@ if engine.dialect.name == "sqlite":
     user_columns = {column["name"] for column in inspect(engine).get_columns("users")}
     if "role" not in user_columns:
         with engine.begin() as connection:
-            connection.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR(20) DEFAULT 'employee'"))
-
-_zoom_token: str | None = None
+            connection.execute(
+                text("ALTER TABLE users ADD COLUMN role VARCHAR(20) DEFAULT 'employee'")
+            )
 
 
 @app.get("/health", tags=["system"])
@@ -108,162 +122,25 @@ async def api_root() -> dict[str, str]:
     return {"service": "AI Meeting Assistant API", "status": "ok"}
 
 
-def _zoom_secret_token() -> str:
-    secret = os.getenv("ZOOM_WEBHOOK_SECRET_TOKEN")
-    if not secret:
-        raise HTTPException(
-            status_code=503,
-            detail="ZOOM_WEBHOOK_SECRET_TOKEN is not configured.",
-        )
-    return secret
+@app.get("/api/system/capabilities", tags=["system"])
+async def capabilities() -> dict[str, object]:
+    """Report which optional pieces of the stack are actually installed.
 
+    The bot degrades rather than crashes when Playwright's browsers or the
+    virtual audio devices are missing, which makes a silent half-working setup
+    easy to miss. This endpoint makes that state visible to the dashboard.
+    """
+    def _installed(module: str) -> bool:
+        import importlib.util
 
-def _require_zoom_access_token() -> str:
-    if not _zoom_token:
-        raise HTTPException(
-            status_code=401,
-            detail="Zoom is not authorized. Complete the OAuth flow first.",
-        )
-    return _zoom_token
-
-
-async def _set_rtms_status(meeting_id: int, action: str) -> dict[str, Any]:
-    client_id = os.getenv("ZOOM_CLIENT_ID")
-    if not client_id:
-        raise HTTPException(status_code=503, detail="ZOOM_CLIENT_ID is not configured.")
-
-    async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.patch(
-            f"https://api.zoom.us/v2/live_meetings/{meeting_id}/rtms_app/status",
-            headers={"Authorization": f"Bearer {_require_zoom_access_token()}"},
-            json={"action": action, "settings": {"client_id": client_id}},
-        )
-
-    if response.is_error:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Zoom RTMS {action} request failed: {response.text}",
-        )
-    return response.json()
-
-
-def _verify_zoom_signature(body: bytes, timestamp: str, signature: str) -> bool:
-    """Verify a Zoom webhook request using its version-0 HMAC signature."""
-    if not timestamp or not signature:
-        return False
-
-    try:
-        if abs(time.time() - int(timestamp)) > 300:
-            return False
-    except ValueError:
-        return False
-
-    message = f"v0:{timestamp}:{body.decode('utf-8')}".encode()
-    expected = "v0=" + hmac.new(
-        _zoom_secret_token().encode(), message, hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(expected, signature)
-
-
-@app.patch("/api/integrations/zoom/rtms/start/{meeting_id}", tags=["zoom"])
-async def start_zoom_rtms(meeting_id: int) -> dict[str, Any]:
-    """Start RTMS for a meeting using the authorized Zoom account."""
-    return await _set_rtms_status(meeting_id, "start")
-
-
-@app.patch("/api/integrations/zoom/rtms/stop/{meeting_id}", tags=["zoom"])
-async def stop_zoom_rtms(meeting_id: int) -> dict[str, Any]:
-    """Stop RTMS for a meeting using the authorized Zoom account."""
-    return await _set_rtms_status(meeting_id, "stop")
-
-
-@app.get("/api/integrations/zoom/authorize", tags=["zoom"])
-async def authorize_zoom(request: Request) -> dict[str, str]:
-    """Return the Zoom OAuth URL needed before RTMS can be enabled."""
-    client_id = os.getenv("ZOOM_CLIENT_ID")
-    if not client_id:
-        raise HTTPException(status_code=503, detail="ZOOM_CLIENT_ID is not configured.")
-    redirect_uri = str(request.url).replace("/authorize", "/callback")
-    query = urlencode({
-        "response_type": "code",
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-    })
-    return {"authorization_url": f"https://zoom.us/oauth/authorize?{query}"}
-
-
-@app.post("/api/integrations/zoom/webhook", tags=["zoom"])
-async def zoom_webhook(request: Request) -> dict[str, str]:
-    """Validate Zoom's webhook endpoint and accept verified RTMS lifecycle events."""
-    body = await request.body()
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError as error:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload.") from error
-
-    if payload.get("event") == "endpoint.url_validation":
-        plain_token = payload.get("payload", {}).get("plainToken")
-        if not plain_token:
-            raise HTTPException(status_code=400, detail="Missing Zoom validation token.")
-        encrypted_token = hmac.new(
-            _zoom_secret_token().encode(), plain_token.encode(), hashlib.sha256
-        ).hexdigest()
-        return {"plainToken": plain_token, "encryptedToken": encrypted_token}
-
-    if not _verify_zoom_signature(
-        body,
-        request.headers.get("x-zm-request-timestamp", ""),
-        request.headers.get("x-zm-signature", ""),
-    ):
-        raise HTTPException(status_code=401, detail="Invalid Zoom webhook signature.")
-
-    return {"status": "accepted"}
-
-
-@app.get("/api/integrations/zoom/callback", tags=["zoom"])
-async def zoom_oauth_callback(
-    request: Request,
-    code: str | None = None,
-    error: str | None = None,
-) -> dict[str, str]:
-    """Receive the OAuth authorization result from Zoom during local testing."""
-    if error:
-        raise HTTPException(status_code=400, detail=f"Zoom authorization failed: {error}")
-    if not code:
-        raise HTTPException(status_code=400, detail="Missing Zoom authorization code.")
-
-    client_id = os.getenv("ZOOM_CLIENT_ID")
-    client_secret = os.getenv("ZOOM_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        raise HTTPException(
-            status_code=503,
-            detail="ZOOM_CLIENT_ID and ZOOM_CLIENT_SECRET are not configured.",
-        )
-
-    redirect_uri = str(request.url).split("?", 1)[0]
-    async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.post(
-            "https://zoom.us/oauth/token",
-            auth=(client_id, client_secret),
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-            },
-        )
-
-    if response.is_error:
-        raise HTTPException(
-            status_code=502,
-            detail="Zoom token exchange failed.",
-        )
-
-    global _zoom_token
-    _zoom_token = response.json().get("access_token")
-    if not _zoom_token:
-        raise HTTPException(status_code=502, detail="Zoom did not return an access token.")
+        return importlib.util.find_spec(module) is not None
 
     return {
-        "status": "authorized",
-        "message": "Zoom authorization completed successfully.",
+        "platforms": ["zoom", "google_meet"],
+        "browser_automation": _installed("playwright"),
+        "audio_devices": _installed("sounddevice"),
+        "transcription": _installed("faster_whisper"),
+        "whisper_model": os.getenv("WHISPER_MODEL", "small"),
+        "llm_model": os.getenv("OLLAMA_MODEL", "qwen2.5:7b"),
+        "tts": _installed("pyttsx3"),
     }

@@ -1,8 +1,16 @@
-"""Meeting recording management router."""
+"""Meeting recording management router.
+
+Recording is opt-in and off by default: the audio is only written to disk while
+a `Recording` row for the meeting has `enabled` set, and turning it on stamps
+`consent_given_at`. The bot reads that flag once per meeting — see
+`app.services.live_pipeline.LiveMeetingPipeline._open_recording`.
+"""
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -64,3 +72,30 @@ def toggle_recording(
     db.commit()
     db.refresh(rec)
     return rec
+
+
+@router.get("/download")
+def download_recording(
+    meeting_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """Download the meeting's recorded audio, if one was captured."""
+    meeting = _get_owned_meeting(meeting_id, user, db)
+    rec = db.scalar(select(Recording).where(Recording.meeting_id == meeting_id))
+    if not rec or not rec.file_path:
+        raise HTTPException(status_code=404, detail="No recording exists for this meeting.")
+
+    path = Path(rec.file_path)
+    if not path.is_file():
+        raise HTTPException(
+            status_code=410,
+            detail="The recording file is no longer on disk.",
+        )
+
+    safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in meeting.title)
+    return FileResponse(
+        path,
+        media_type="audio/wav",
+        filename=f"{safe_title or 'meeting'}-{meeting_id}.wav",
+    )

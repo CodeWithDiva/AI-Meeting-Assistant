@@ -33,6 +33,10 @@ recordings/
 temp/
 tmp/
 
+# Screenshots and DOM dumps the meeting bot saves when a join fails
+debug/
+.pytest_cache/
+
 # AI Models
 models/
 *.bin

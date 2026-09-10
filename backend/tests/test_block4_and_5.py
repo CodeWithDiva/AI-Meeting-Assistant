@@ -1,6 +1,5 @@
-"""Tests for Block 4 (Zoom Bot) and Block 5 (Notifications System)."""
+"""Tests for the meeting-agent lifecycle and the notifications system."""
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -8,64 +7,67 @@ from app.main import app
 client = TestClient(app)
 
 
-def test_block4_zoom_and_block5_notifications():
-    # 1. Register & Login
+def test_agent_lifecycle_and_notifications(monkeypatch):
+    async def fake_join(self, join_url: str) -> dict[str, object]:
+        self.status = "listening"
+        self.is_connected = True
+        return {"status": "listening", "platform": "zoom", "simulated": True}
+
+    async def fake_leave(self) -> dict[str, object]:
+        self.status = "left"
+        self.is_connected = False
+        return {"status": "left", "message": "left", "notes": {"assigned": 0}}
+
+    monkeypatch.setattr("app.agents.browser_bot.BrowserMeetingBot.join_meeting", fake_join)
+    monkeypatch.setattr("app.agents.browser_bot.BrowserMeetingBot.leave_meeting", fake_leave)
+
+    # 1. Register & login
     email = "block45_tester@example.com"
     password = "securePassword123"
     client.post("/api/auth/register", json={"email": email, "password": password})
     res = client.post("/api/auth/login", json={"email": email, "password": password})
     assert res.status_code == 200
-    token = res.json()["access_token"]
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {res.json()['access_token']}"}
 
-    # 2. Create Meeting
-    m_res = client.post(
-        "/api/meetings",
-        json={"title": "Enterprise Zoom All-Hands", "platform": "zoom"},
-        headers=headers,
-    )
-    assert m_res.status_code == 201
-    meeting_id = m_res.json()["id"]
-
-    # 3. Test Block 4: Zoom Bot Join & Leave
+    # 2. Send the agent in with nothing but a link
     join_res = client.post(
-        f"/api/zoom/join/{meeting_id}",
-        json={"zoom_url_or_id": "https://zoom.us/j/1234567890"},
+        "/api/agent/join",
+        json={"link": "https://zoom.us/j/1234567890", "title": "Enterprise All-Hands"},
         headers=headers,
     )
-    assert join_res.status_code == 200
-    assert join_res.json()["status"] == "listening"
+    assert join_res.status_code == 202
+    meeting_id = join_res.json()["meeting_id"]
+    assert join_res.json()["state"] == "JOINING"
 
-    status_res = client.get(f"/api/zoom/status/{meeting_id}", headers=headers)
+    # 3. Status is readable for a meeting the agent was dispatched to
+    status_res = client.get(f"/api/agent/status/{meeting_id}", headers=headers)
     assert status_res.status_code == 200
-    assert status_res.json()["status"] == "listening"
+    assert status_res.json()["state"] in {"JOINING", "IN_MEETING", "idle"}
 
-    leave_res = client.post(f"/api/zoom/leave/{meeting_id}", headers=headers)
+    # 4. Leaving finalizes the session
+    leave_res = client.post(f"/api/agent/leave/{meeting_id}", headers=headers)
     assert leave_res.status_code == 200
-    assert leave_res.json()["status"] == "left"
+    assert leave_res.json()["state"] == "COMPLETE"
 
-    # 4. Test Block 5: Meeting Analysis creates Notification
+    # 5. Analysis of a saved transcript raises a notification
     client.patch(
         f"/api/meetings/{meeting_id}",
-        json={"transcript": "Ali: We will ship version 1.0 on Monday."},
+        json={"transcript": "[Ali]: We agreed to ship version 1.0 on Monday."},
         headers=headers,
     )
     analyze_res = client.post(f"/api/meetings/{meeting_id}/analyze", headers=headers)
     assert analyze_res.status_code == 200
 
-    # 5. Fetch In-App Notifications
+    # 6. Fetch in-app notifications
     notif_res = client.get("/api/notifications", headers=headers)
     assert notif_res.status_code == 200
     notifications = notif_res.json()
     assert len(notifications) >= 1
-    notif_id = notifications[0]["id"]
     assert "Summary Ready" in notifications[0]["title"]
+    notif_id = notifications[0]["id"]
 
-    # 6. Mark Notification as Read
+    # 7. Mark one, then all, as read
     read_res = client.patch(f"/api/notifications/{notif_id}/read", headers=headers)
     assert read_res.status_code == 200
     assert read_res.json()["read"] is True
-
-    # 7. Mark All Notifications as Read
-    mark_all = client.post("/api/notifications/mark-all-read", headers=headers)
-    assert mark_all.status_code == 200
+    assert client.post("/api/notifications/mark-all-read", headers=headers).status_code == 200

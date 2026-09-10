@@ -98,11 +98,63 @@ export interface Recording {
   created_at?: string | null;
 }
 
+/** Lifecycle the agent reports, also pushed over WS as `agent_state`. */
+export type AgentState =
+  | "idle"
+  | "SCHEDULED"
+  | "JOINING"
+  | "IN_MEETING"
+  | "PROCESSING"
+  | "COMPLETE"
+  | "FAILED_JOIN"
+  | "DISCONNECTED";
+
+export type MeetingPlatform = "zoom" | "google_meet";
+
 export interface AgentStatus {
-  state: "idle" | "joining" | "listening" | "processing" | "answering" | "leaving" | "stopped" | string;
   meeting_id?: number | null;
-  mode?: string;
+  state: AgentState;
+  platform?: MeetingPlatform | string | null;
+  is_connected: boolean;
+  /** True when the browser/audio hardware is missing and no real audio flows. */
+  simulated: boolean;
+  active_speaker?: string | null;
+  participants: string[];
   error?: string | null;
+}
+
+export interface AgentJoinResult {
+  meeting_id: number;
+  platform: MeetingPlatform | string;
+  state: AgentState;
+  title: string;
+  recording_enabled: boolean;
+  message: string;
+}
+
+export interface AgentNotesReport {
+  decisions?: number;
+  action_items?: number;
+  assigned?: number;
+  unassigned?: number;
+}
+
+export interface AgentLeaveResult {
+  meeting_id: number;
+  state: AgentState;
+  message: string;
+  notes: AgentNotesReport;
+}
+
+/** Which optional parts of the stack are actually installed on the server. */
+export interface SystemCapabilities {
+  platforms: string[];
+  browser_automation: boolean;
+  audio_devices: boolean;
+  transcription: boolean;
+  whisper_model: string;
+  llm_model: string;
+  tts: boolean;
 }
 
 export interface Speaker {
@@ -445,26 +497,39 @@ export const api = {
     return `${base}/ws/meetings/${meetingId}/live?token=${encodeURIComponent(token)}`;
   },
 
-  // Zoom Bot (Block 4)
-  async joinZoomMeeting(meetingId: number | string, zoomUrlOrId: string): Promise<{ status: string; message: string; simulated?: boolean }> {
-    return apiRequest<{ status: string; message: string; simulated?: boolean }>(`/api/zoom/join/${meetingId}`, {
+  // Meeting agent — paste a link and the assistant joins.
+  // The join runs in the background; watch `agent_state` on the meeting
+  // WebSocket for JOINING → IN_MEETING → PROCESSING → COMPLETE.
+  async sendAgentToMeeting(link: string, options: { title?: string; record?: boolean } = {}): Promise<AgentJoinResult> {
+    return apiRequest<AgentJoinResult>("/api/agent/join", {
       method: "POST",
-      body: JSON.stringify({ zoom_url_or_id: zoomUrlOrId }),
+      body: JSON.stringify({ link, title: options.title, record: options.record ?? false }),
     });
   },
 
-  async leaveZoomMeeting(meetingId: number | string): Promise<{ status: string; message: string }> {
-    return apiRequest<{ status: string; message: string }>(`/api/zoom/leave/${meetingId}`, {
+  async joinExistingMeeting(meetingId: number | string, link: string, record: boolean = false): Promise<AgentJoinResult> {
+    return apiRequest<AgentJoinResult>(`/api/agent/join/${meetingId}`, {
+      method: "POST",
+      body: JSON.stringify({ link, record }),
+    });
+  },
+
+  async leaveMeeting(meetingId: number | string): Promise<AgentLeaveResult> {
+    return apiRequest<AgentLeaveResult>(`/api/agent/leave/${meetingId}`, {
       method: "POST",
     });
   },
 
-  async getZoomStatus(meetingId: number | string): Promise<{ meeting_id: number; status: string; is_connected: boolean }> {
-    return apiRequest<{ meeting_id: number; status: string; is_connected: boolean }>(`/api/zoom/status/${meetingId}`);
+  async getAgentStatus(meetingId: number | string): Promise<AgentStatus> {
+    return apiRequest<AgentStatus>(`/api/agent/status/${meetingId}`);
   },
 
-  async getZoomAuthorizationUrl(): Promise<{ authorization_url: string }> {
-    return apiRequest<{ authorization_url: string }>("/api/integrations/zoom/authorize");
+  async getActiveAgentSessions(): Promise<AgentStatus[]> {
+    return apiRequest<AgentStatus[]>("/api/agent/sessions");
+  },
+
+  async getSystemCapabilities(): Promise<SystemCapabilities> {
+    return apiRequest<SystemCapabilities>("/api/system/capabilities");
   },
 
   // Notifications (Block 5)
@@ -480,24 +545,6 @@ export const api = {
 
   async markAllNotificationsRead(): Promise<{ status: string; count: number }> {
     return apiRequest<{ status: string; count: number }>("/api/notifications/mark-all-read", {
-      method: "POST",
-    });
-  },
-
-  // Simulated / Real Agent
-  async getAgentStatus(): Promise<AgentStatus> {
-    return apiRequest<AgentStatus>("/api/agent/status");
-  },
-
-  async startAgent(meetingId: number | string, mode: string = "simulated"): Promise<{ status: string }> {
-    return apiRequest<{ status: string }>("/api/agent/start", {
-      method: "POST",
-      body: JSON.stringify({ meeting_id: Number(meetingId), mode }),
-    });
-  },
-
-  async stopAgent(): Promise<{ status: string }> {
-    return apiRequest<{ status: string }>("/api/agent/stop", {
       method: "POST",
     });
   },

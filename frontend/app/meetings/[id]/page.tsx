@@ -6,6 +6,7 @@ import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import LiveRecorder from "@/app/components/LiveRecorder";
 import {
   ActionItem,
+  AgentState,
   api,
   authStorage,
   Decision,
@@ -53,11 +54,14 @@ export default function MeetingDetailPage() {
   const [chatLoading, setChatLoading] = useState(false);
   const [playingTTS, setPlayingTTS] = useState(false);
 
-  // Agent status
-  const [agentState, setAgentState] = useState<string>("idle");
+  // Meeting agent
+  const [agentState, setAgentState] = useState<AgentState>("idle");
   const [agentBusy, setAgentBusy] = useState(false);
-  const [zoomUrlOrId, setZoomUrlOrId] = useState("");
-  const [zoomAuthorizing, setZoomAuthorizing] = useState(false);
+  const [meetingLink, setMeetingLink] = useState("");
+  const [recordAudio, setRecordAudio] = useState(false);
+  const [agentSimulated, setAgentSimulated] = useState(false);
+  const [agentParticipants, setAgentParticipants] = useState<string[]>([]);
+  const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
   const [currentUserRole, setCurrentUserRole] = useState<string>("");
 
   // Ava Voice Reply + Realtime WS
@@ -70,6 +74,10 @@ export default function MeetingDetailPage() {
   >([]);
   const [avaTestInput, setAvaTestInput] = useState("");
   const [testingAva, setTestingAva] = useState(false);
+
+  // The assistant is in the room while it is joining or listening — both are
+  // states where the only useful action is to pull it back out.
+  const agentIsActive = agentState === "JOINING" || agentState === "IN_MEETING";
 
   useEffect(() => {
     if (!authStorage.isLoggedIn()) {
@@ -90,8 +98,17 @@ export default function MeetingDetailPage() {
     if (!authStorage.isLoggedIn()) return;
     api.getMe().then((user) => setCurrentUserRole(user.role || "employee")).catch(() => undefined);
     const refreshAgentStatus = () => {
-      api.getZoomStatus(meetingId).then((status) => setAgentState(status.status || "idle")).catch(() => undefined);
+      api
+        .getAgentStatus(meetingId)
+        .then((status) => {
+          setAgentState(status.state || "idle");
+          setAgentSimulated(status.simulated);
+          setAgentParticipants(status.participants || []);
+          setActiveSpeaker(status.active_speaker || null);
+        })
+        .catch(() => undefined);
     };
+    refreshAgentStatus();
     const interval = window.setInterval(refreshAgentStatus, 3000);
     return () => window.clearInterval(interval);
   }, [meetingId]);
@@ -105,32 +122,39 @@ export default function MeetingDetailPage() {
       ws.onopen = () => setWsConnected(true);
       ws.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data);
-          if (data.event === "agent_state") {
-            setAgentState(data.state || "idle");
-          } else if (data.event === "ava_reply") {
-            if (data.audio_base64) {
+          // The server sends { event, data } — the payload lives one level down.
+          const message = JSON.parse(event.data);
+          const payload = message.data ?? {};
+          if (message.event === "agent_state") {
+            setAgentState(payload.state || "idle");
+            if (typeof payload.simulated === "boolean") setAgentSimulated(payload.simulated);
+            if (payload.error) setError(payload.error);
+          } else if (message.event === "notes_ready") {
+            // The bot finished writing the notes; pull the fresh meeting in.
+            loadMeetingData();
+          } else if (message.event === "ava_reply") {
+            if (payload.audio_base64) {
               try {
-                const snd = new Audio(`data:audio/wav;base64,${data.audio_base64}`);
+                const snd = new Audio(`data:audio/wav;base64,${payload.audio_base64}`);
                 snd.play().catch(() => {});
               } catch {}
             }
             setAvaReplies((prev) => [
               {
                 id: String(Date.now()),
-                question: data.question || "",
-                answer: data.answer || "",
-                audio_base64: data.audio_base64 || "",
+                question: payload.question || "",
+                answer: payload.answer || "",
+                audio_base64: payload.audio_base64 || "",
                 timestamp: new Date().toLocaleTimeString(),
               },
               ...prev,
             ]);
-          } else if (data.event === "transcript_live") {
+          } else if (message.event === "transcript_live") {
             setLiveTranscripts((prev) => [
               ...prev,
               {
-                speaker: data.speaker || "Speaker",
-                text: data.text || "",
+                speaker: payload.speaker || "Speaker",
+                text: payload.text || "",
                 timestamp: new Date().toLocaleTimeString(),
               },
             ]);
@@ -201,18 +225,22 @@ export default function MeetingDetailPage() {
     setLoading(true);
     setError("");
     try {
-      const [detail, recData, speakersData, zoomData] = await Promise.all([
+      const [detail, recData, speakersData, agentData] = await Promise.all([
         api.getMeeting(meetingId),
         api.getRecording(meetingId).catch(() => null),
         api.getSpeakers(meetingId).catch(() => []),
-        api.getZoomStatus(meetingId).catch(() => ({ status: "idle" })),
+        api.getAgentStatus(meetingId).catch(() => null),
       ]);
 
       setMeeting(detail);
       setInsights(await api.getMeetingInsights(meetingId).catch(() => null));
       setRecording(recData);
       setSpeakers(speakersData);
-      setAgentState(zoomData.status || "idle");
+      if (agentData) {
+        setAgentState(agentData.state || "idle");
+        setAgentSimulated(agentData.simulated);
+        setAgentParticipants(agentData.participants || []);
+      }
     } catch (err: any) {
       setError(err?.message || "Failed to load meeting details");
     } finally {
@@ -437,53 +465,43 @@ export default function MeetingDetailPage() {
   }
 
   async function handleAgentToggle() {
-    const isJoining =
-      agentState === "idle" ||
-      agentState === "stopped" ||
-      agentState === "left" ||
-      agentState === "FAILED_JOIN" ||
-      agentState === "failed_join" ||
-      agentState === "DISCONNECTED" ||
-      agentState === "disconnected";
+    if (agentIsActive) {
+      setAgentBusy(true);
+      setError("");
+      try {
+        const result = await api.leaveMeeting(meetingId);
+        setAgentState("COMPLETE");
+        const { decisions = 0, action_items = 0, assigned = 0 } = result.notes || {};
+        setSuccess(
+          `${result.message} ${decisions} decision(s) and ${action_items} task(s) extracted, ` +
+            `${assigned} assigned automatically.`
+        );
+        await loadMeetingData();
+      } catch (err: any) {
+        setError(err?.message || "Could not disconnect the assistant.");
+      } finally {
+        setAgentBusy(false);
+      }
+      return;
+    }
 
-    if (isJoining && !zoomUrlOrId.trim()) {
-      setError("Pehle Zoom Meeting URL ya Meeting ID enter karein.");
+    if (!meetingLink.trim()) {
+      setError("Pehle Zoom ya Google Meet ka link paste karein.");
       return;
     }
     setAgentBusy(true);
     setError("");
     try {
-      if (isJoining) {
-        const result = await api.joinZoomMeeting(meetingId, zoomUrlOrId.trim());
-        // Bot always succeeds now (falls back to simulated if browser fails)
-        setAgentState(result.simulated ? "listening" : "listening");
-        const modeNote = result.simulated
-          ? " (Simulated mode — Playwright not installed. Ava still works via test input!)"
-          : " Bot is live in Zoom.";
-        setSuccess((result.message || "Zoom agent connected.") + modeNote);
-      } else {
-        const result = await api.leaveZoomMeeting(meetingId);
-        setAgentState("left");
-        setSuccess(result.message || "Zoom agent disconnected. Notes being finalized...");
-        // Reload meeting data after a brief delay so finalized notes appear
-        setTimeout(() => loadMeetingData(), 3000);
-      }
+      // Returns as soon as the join is dispatched; progress arrives over the
+      // WebSocket as `agent_state` events.
+      const result = await api.joinExistingMeeting(meetingId, meetingLink.trim(), recordAudio);
+      setAgentState("JOINING");
+      setSuccess(result.message);
     } catch (err: any) {
-      setError(err?.message || "Bot se connect nahi ho saka. Dobara try karein.");
+      setError(err?.message || "Assistant meeting join nahi kar saka. Dobara try karein.");
       setAgentState("FAILED_JOIN");
     } finally {
       setAgentBusy(false);
-    }
-  }
-
-  async function handleZoomAuthorize() {
-    setZoomAuthorizing(true);
-    try {
-      const result = await api.getZoomAuthorizationUrl();
-      window.location.href = result.authorization_url;
-    } catch (err: any) {
-      setError(err?.message || "Could not start Zoom authorization.");
-      setZoomAuthorizing(false);
     }
   }
 
@@ -506,21 +524,25 @@ export default function MeetingDetailPage() {
       .filter(Boolean);
   }
 
+  function getAgentPillClass(state: string) {
+    if (state === "IN_MEETING") return "is-live";
+    if (state === "JOINING" || state === "PROCESSING") return "is-work";
+    if (state === "FAILED_JOIN" || state === "DISCONNECTED") return "is-fail";
+    return "is-idle";
+  }
+
   function getAgentPresentation(state: string) {
-    const s = (state || "idle").toLowerCase();
     const states: Record<string, { label: string; badge: string }> = {
-      idle: { label: "Idle / Scheduled", badge: "badge-indigo" },
-      joining: { label: "Joining Zoom...", badge: "badge-amber" },
-      listening: { label: "In Meeting & Listening", badge: "badge-emerald" },
-      in_meeting: { label: "In Meeting & Listening", badge: "badge-emerald" },
-      processing: { label: "Processing Transcript", badge: "badge-cyan" },
-      complete: { label: "Session Complete", badge: "badge-emerald" },
-      leaving: { label: "Disconnecting...", badge: "badge-amber" },
-      stopped: { label: "Disconnected", badge: "badge-rose" },
-      disconnected: { label: "Disconnected", badge: "badge-rose" },
-      failed_join: { label: "Failed Join - Retry", badge: "badge-rose" },
+      idle: { label: "Not in a meeting", badge: "badge-indigo" },
+      SCHEDULED: { label: "Scheduled", badge: "badge-indigo" },
+      JOINING: { label: "Joining...", badge: "badge-amber" },
+      IN_MEETING: { label: "In meeting & listening", badge: "badge-emerald" },
+      PROCESSING: { label: "Writing the notes", badge: "badge-cyan" },
+      COMPLETE: { label: "Notes ready", badge: "badge-emerald" },
+      DISCONNECTED: { label: "Disconnected", badge: "badge-rose" },
+      FAILED_JOIN: { label: "Could not join — retry", badge: "badge-rose" },
     };
-    return states[s] || { label: state.replaceAll("_", " "), badge: "badge-amber" };
+    return states[state] || { label: state.replaceAll("_", " "), badge: "badge-amber" };
   }
 
   if (loading) {
@@ -705,7 +727,7 @@ export default function MeetingDetailPage() {
           onClick={() => setActiveTab("agent")}
         >
           <span>🤖</span>
-          <span>Zoom Agent & Ava Voice</span>
+          <span>Meeting Agent & Ava Voice</span>
         </button>
       </div>
 
@@ -850,7 +872,7 @@ export default function MeetingDetailPage() {
               <input
                 type="text"
                 className="form-input"
-                placeholder="Task description (e.g. Implement Zoom RTMS connector)..."
+                placeholder="Task description (e.g. Send the client the revised timeline)..."
                 value={newTaskText}
                 onChange={(e) => setNewTaskText(e.target.value)}
                 required
@@ -1306,43 +1328,45 @@ export default function MeetingDetailPage() {
             {/* Header & Status Bar */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
               <div>
-                <h3 style={{ fontSize: 18, marginBottom: 4 }}>Zoom Agent & Ava Voice Reply Stream</h3>
+                <h3 style={{ fontSize: 18, marginBottom: 4 }}>Meeting Agent & Ava Voice Reply Stream</h3>
                 <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                  Autonomous RTMS bot + &quot;Ava&quot; wake-word voice answers generated via Piper/pyttsx3 TTS.
+                  Our own browser agent joins Zoom or Google Meet, and answers out loud on the &quot;Ava&quot; wake-word via Piper/pyttsx3 TTS.
                 </p>
               </div>
 
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span className={`badge ${wsConnected ? "badge-emerald" : "badge-rose"}`}>
-                  {wsConnected ? "🟢 Live WS Connected" : "⚪ WS Disconnected"}
+              <div className="agent-pillbar">
+                <span className={`agent-pill ${wsConnected ? "is-live" : "is-idle"}`}>
+                  <span className="dot" />
+                  {wsConnected ? "Live" : "Offline"}
                 </span>
-                <span
-                  className={`badge ${getAgentPresentation(agentState).badge}`}
-                  style={{ textTransform: "uppercase", padding: "6px 14px", fontSize: 13 }}
-                >
-                  Bot Status: {getAgentPresentation(agentState).label}
+                <span className={`agent-pill ${getAgentPillClass(agentState)}`}>
+                  <span className="dot" />
+                  {getAgentPresentation(agentState).label}
                 </span>
               </div>
             </div>
 
             {/* Ava Active Listening Banner */}
-            {(agentState.toLowerCase() === "listening" || agentState.toLowerCase() === "in_meeting") && (
+            {agentState === "IN_MEETING" && (
               <div
                 style={{
-                  background: "rgba(16, 185, 129, 0.12)",
-                  border: "1px solid rgba(16, 185, 129, 0.3)",
+                  background: "#ecfdf5",
+                  border: "1px solid #a7f3d0",
                   borderRadius: "var(--radius-md)",
-                  padding: "14px 18px",
+                  padding: "13px 16px",
                   display: "flex",
                   alignItems: "center",
                   gap: 12,
-                  color: "#10b981",
+                  color: "#047857",
                   fontWeight: 600,
-                  fontSize: 14,
+                  fontSize: 13,
                 }}
               >
-                <span className="spinner" style={{ borderColor: "#10b981", borderTopColor: "transparent", width: 20, height: 20 }} />
-                <span>🎤 Ava is actively listening in Zoom. Say &quot;Ava, what is the deployment status?&quot; to hear a voice reply!</span>
+                <span
+                  className="spinner"
+                  style={{ borderColor: "#a7f3d0", borderTopColor: "#047857", width: 18, height: 18 }}
+                />
+                <span>Ava is listening in the meeting. Say &quot;Ava, …&quot; to get a spoken reply.</span>
               </div>
             )}
 
@@ -1453,87 +1477,90 @@ export default function MeetingDetailPage() {
               </div>
             </div>
 
-            {/* Bottom Card: Zoom Bot Controller */}
-            <div
-              style={{
-                background: "var(--bg-input)",
-                padding: 24,
-                borderRadius: "var(--radius-md)",
-                border: "1px solid var(--border-subtle)",
-                display: "flex",
-                flexDirection: "column",
-                gap: 16,
-              }}
-            >
-              <h4 style={{ fontSize: 15, color: "#fff", marginBottom: 2 }}>🤖 Zoom Autonomous Bot Controller</h4>
-              <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.5 }}>
-                Launch the RTMS audio bot into your Zoom meeting room. The bot streams real-time audio, listens for the wake-word &quot;Ava&quot;, and generates spoken audio replies.
+            {/* Meeting agent controller */}
+            <div className="launch-card" style={{ margin: 0 }}>
+              <span className="eyebrow">MEETING ASSISTANT</span>
+              <h2>Send the assistant into this meeting</h2>
+              <p className="launch-sub">
+                Paste a Zoom or Google Meet link. The assistant joins as a participant, transcribes
+                Urdu and English, answers on the &quot;Ava&quot; wake-word, and writes the notes,
+                decisions and tasks when it leaves.
               </p>
 
-              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <div className="launch-row">
                 <input
                   type="text"
                   className="form-input"
-                  style={{ flex: 1, minWidth: 280 }}
-                  placeholder="e.g. https://zoom.us/j/849203948..."
-                  value={zoomUrlOrId}
-                  onChange={(e) => setZoomUrlOrId(e.target.value)}
-                  disabled={agentBusy || agentState.toLowerCase() === "listening" || agentState.toLowerCase() === "in_meeting"}
+                  placeholder="https://zoom.us/j/…  ·  https://meet.google.com/abc-defg-hij"
+                  value={meetingLink}
+                  onChange={(e) => setMeetingLink(e.target.value)}
+                  disabled={agentBusy || agentIsActive}
                 />
                 <button
                   type="button"
                   onClick={handleAgentToggle}
-                  className={`btn ${
-                    agentState.toLowerCase() === "listening" || agentState.toLowerCase() === "in_meeting"
-                      ? "btn-danger"
-                      : "btn-primary"
-                  }`}
+                  className={`btn btn-lg ${agentIsActive ? "btn-danger" : "btn-primary"}`}
                   disabled={agentBusy}
                 >
                   {agentBusy ? (
                     <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                       <span className="spinner" />
-                      <span>Communicating with Bot...</span>
+                      <span>Working…</span>
                     </span>
-                  ) : agentState.toLowerCase() === "listening" || agentState.toLowerCase() === "in_meeting" ? (
-                    "Disconnect Bot from Zoom"
-                  ) : agentState.toLowerCase() === "stopped" || agentState.toLowerCase() === "failed_join" ? (
-                    "Retry Zoom Bot Join"
+                  ) : agentIsActive ? (
+                    "Leave & write notes"
+                  ) : agentState === "FAILED_JOIN" ? (
+                    "Retry join"
                   ) : (
-                    "Launch Zoom Agent Bot"
+                    "Join meeting"
                   )}
                 </button>
               </div>
 
-              <div
-                style={{
-                  background: "var(--bg-card)",
-                  border: "1px solid var(--border-card)",
-                  borderRadius: "var(--radius-sm)",
-                  padding: 14,
-                  fontSize: 12,
-                  lineHeight: 1.6,
-                  color: "var(--text-secondary)",
-                }}
-              >
-                <strong>OAuth Authorization Note:</strong> RTMS raw media audio stream requires an authorized Zoom Client ID.
-                <div style={{ marginTop: 8 }}>
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    onClick={handleZoomAuthorize}
-                    disabled={zoomAuthorizing}
-                  >
-                    {zoomAuthorizing ? "Redirecting..." : "Authorize Zoom OAuth"}
-                  </button>
+              <label className="launch-consent">
+                <input
+                  type="checkbox"
+                  checked={recordAudio}
+                  onChange={(e) => setRecordAudio(e.target.checked)}
+                  disabled={agentBusy || agentIsActive}
+                />
+                <span>
+                  Record the meeting audio to disk — off by default. Tell participants before you turn this on.
+                </span>
+              </label>
+
+              {agentSimulated && (
+                <div
+                  style={{
+                    background: "#fffbeb",
+                    border: "1px solid #fde68a",
+                    borderRadius: "var(--radius-sm)",
+                    padding: "12px 14px",
+                    marginTop: 14,
+                    fontSize: 12,
+                    lineHeight: 1.6,
+                    color: "#92400e",
+                  }}
+                >
+                  <strong>Simulated mode.</strong> The browser or audio devices aren&apos;t set up on the
+                  server, so no real meeting audio is being captured. See <code>docs/browser-bot-setup.md</code>.
                 </div>
-              </div>
+              )}
+
+              {agentParticipants.length > 0 && (
+                <div className="roster-line" style={{ marginTop: 14 }}>
+                  <strong>In the room:</strong> {agentParticipants.join(", ")}
+                  {activeSpeaker && activeSpeaker !== "Speaker" && (
+                    <span> · Speaking now: <strong>{activeSpeaker}</strong></span>
+                  )}
+                </div>
+              )}
 
               {/* Real-time WS Raw Transcript Stream */}
               {liveTranscripts.length > 0 && (
                 <div style={{ marginTop: 10 }}>
                   <h5 style={{ fontSize: 13, color: "var(--text-primary)", marginBottom: 8 }}>
-                    📡 Live RTMS Audio Stream Feed ({liveTranscripts.length})
+                    📡 Live transcript ({liveTranscripts.length})
                   </h5>
                   <div
                     style={{

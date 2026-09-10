@@ -19,6 +19,13 @@ export default function DashboardPage() {
   const [newPlatform, setNewPlatform] = useState("zoom");
   const [creating, setCreating] = useState(false);
 
+  // "Paste a link, the assistant joins"
+  const [joinLink, setJoinLink] = useState("");
+  const [joinTitle, setJoinTitle] = useState("");
+  const [joinRecord, setJoinRecord] = useState(false);
+  const [joining, setJoining] = useState(false);
+  const [joinMessage, setJoinMessage] = useState("");
+
   useEffect(() => {
     if (!authStorage.isLoggedIn()) {
       router.push("/login");
@@ -69,6 +76,30 @@ export default function DashboardPage() {
       setError(err?.message || "Could not create meeting");
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function handleSendAssistant(e: FormEvent) {
+    e.preventDefault();
+    if (!joinLink.trim() || joining) return;
+
+    setJoining(true);
+    setError("");
+    setJoinMessage("");
+    try {
+      const result = await api.sendAgentToMeeting(joinLink.trim(), {
+        title: joinTitle.trim() || undefined,
+        record: joinRecord,
+      });
+      setJoinLink("");
+      setJoinTitle("");
+      // The join continues in the background — the meeting page shows it live.
+      setJoinMessage(result.message);
+      router.push(`/meetings/${result.meeting_id}`);
+    } catch (err: any) {
+      setError(err?.message || "Could not send the assistant to that meeting.");
+    } finally {
+      setJoining(false);
     }
   }
 
@@ -160,6 +191,59 @@ export default function DashboardPage() {
       </div>
 
       {error && <div className="alert-box alert-error">{error}</div>}
+      {joinMessage && <div className="alert-box alert-success">{joinMessage}</div>}
+
+      {/* Paste a link, the assistant joins — the primary entry point. */}
+      <div className="launch-card">
+        <span className="eyebrow">MEETING ASSISTANT</span>
+        <h2>Send the assistant to a meeting</h2>
+        <p className="launch-sub">
+          Paste a Zoom or Google Meet link. It joins as a participant, transcribes Urdu and
+          English, then writes the notes, decisions and tasks when it leaves.
+        </p>
+
+        <form onSubmit={handleSendAssistant} className="launch-row">
+          <input
+            type="text"
+            className="form-input"
+            placeholder="https://zoom.us/j/1234567890  ·  https://meet.google.com/abc-defg-hij"
+            value={joinLink}
+            onChange={(e) => setJoinLink(e.target.value)}
+            disabled={joining}
+            aria-label="Meeting link"
+          />
+          <input
+            type="text"
+            className="form-input"
+            style={{ flex: "0 1 200px", minWidth: 160 }}
+            placeholder="Title (optional)"
+            value={joinTitle}
+            onChange={(e) => setJoinTitle(e.target.value)}
+            disabled={joining}
+            aria-label="Meeting title"
+          />
+          <button type="submit" className="btn btn-primary btn-lg" disabled={joining || !joinLink.trim()}>
+            {joining ? (
+              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span className="spinner" />
+                <span>Sending…</span>
+              </span>
+            ) : (
+              <span>Join meeting</span>
+            )}
+          </button>
+        </form>
+
+        <label className="launch-consent">
+          <input
+            type="checkbox"
+            checked={joinRecord}
+            onChange={(e) => setJoinRecord(e.target.checked)}
+            disabled={joining}
+          />
+          <span>Record the audio to disk — off by default. Tell participants before turning this on.</span>
+        </label>
+      </div>
 
       {/* Ledger Strip */}
       <div className="ledger-strip">
@@ -399,7 +483,7 @@ export default function DashboardPage() {
                   value={newPlatform}
                   onChange={(e) => setNewPlatform(e.target.value)}
                 >
-                  <option value="zoom">Zoom (RTMS / Autonomous Bot)</option>
+                  <option value="zoom">Zoom</option>
                   <option value="google_meet">Google Meet</option>
                   <option value="teams">Microsoft Teams</option>
                   <option value="in_person">Direct / Live Mic & Audio Upload</option>

@@ -13,6 +13,13 @@ Usage:
 
     # Broadcast karo (anywhere in backend)
     await ws_manager.broadcast(meeting_id, "agent_state_changed", {"state": "IN_MEETING"})
+
+Cross-loop safety
+-----------------
+The meeting bot runs on its own event loop thread (see
+`app.agents.bot_runtime`), but WebSocket objects belong to the server's loop.
+`bind_loop()` is called once at startup to record the server loop; any
+`broadcast()` invoked from another loop is marshalled back onto it.
 """
 
 from __future__ import annotations
@@ -34,6 +41,12 @@ class ConnectionManager:
         # meeting_id → set of active WebSocket connections
         self._connections: dict[int, set[WebSocket]] = defaultdict(set)
         self._lock = asyncio.Lock()
+        # The server's event loop, recorded by bind_loop() at startup.
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Record the loop that owns the WebSocket connections (server startup)."""
+        self._loop = loop
 
     async def connect(self, meeting_id: int, websocket: WebSocket) -> None:
         """Accept and register a new WebSocket connection for a meeting."""
@@ -51,12 +64,29 @@ class ConnectionManager:
         logger.info("WS disconnected for meeting %d", meeting_id)
 
     async def broadcast(self, meeting_id: int, event_type: str, data: dict) -> None:
-        """
-        Send a JSON event to ALL connected clients for a given meeting.
+        """Send a JSON event to ALL connected clients for a given meeting.
 
-        Payload shape:
-            { "event": "<event_type>", "data": { ... } }
+        Payload shape: ``{ "event": "<event_type>", "data": { ... } }``
+
+        Safe to call from any event loop: if this is running on a loop other
+        than the one that owns the sockets, the work is handed to the owning
+        loop.
         """
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+
+        if self._loop is not None and current is not self._loop:
+            future = asyncio.run_coroutine_threadsafe(
+                self._broadcast(meeting_id, event_type, data), self._loop
+            )
+            await asyncio.wrap_future(future)
+            return
+
+        await self._broadcast(meeting_id, event_type, data)
+
+    async def _broadcast(self, meeting_id: int, event_type: str, data: dict) -> None:
         payload = json.dumps({"event": event_type, "data": data})
         dead_sockets: list[WebSocket] = []
 
@@ -69,7 +99,6 @@ class ConnectionManager:
             except Exception:
                 dead_sockets.append(ws)
 
-        # Clean up dead connections
         if dead_sockets:
             async with self._lock:
                 for ws in dead_sockets:

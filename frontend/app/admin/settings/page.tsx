@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api, authStorage } from "@/lib/api";
+import { api, authStorage, SystemCapabilities } from "@/lib/api";
 
 interface SystemConfig {
   label: string;
@@ -17,14 +17,21 @@ interface SystemConfig {
 export default function AdminSettingsPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
+  // Read from the server rather than hardcoded, so this page shows what is
+  // actually running instead of what the defaults used to be.
+  const [caps, setCaps] = useState<SystemCapabilities | null>(null);
 
   useEffect(() => {
     if (!authStorage.isLoggedIn()) { router.push("/login"); return; }
     api.getMe().then((me) => {
       if (me.role !== "admin") { router.push("/dashboard"); return; }
+      api.getSystemCapabilities().then(setCaps).catch(() => undefined);
       setLoading(false);
     }).catch(() => router.push("/login"));
   }, [router]);
+
+  const installed = (ok: boolean | undefined, missingHint: string) =>
+    ok === undefined ? "Unknown" : ok ? "Installed ✓" : `Not installed — ${missingHint}`;
 
   const configs: SystemConfig[] = [
     {
@@ -38,8 +45,8 @@ export default function AdminSettingsPage() {
     {
       label: "Whisper Model",
       key: "WHISPER_MODEL",
-      value: "base",
-      description: "Faster-Whisper model size: tiny, base, small, medium, large-v2. Larger = more accurate but slower.",
+      value: caps?.whisper_model ?? "…",
+      description: "Faster-Whisper model size: tiny, base, small, medium, large-v2. 'small' is the realistic floor for Urdu; 'base' mangles it.",
       editable: false,
       icon: "🎤",
     },
@@ -76,12 +83,36 @@ export default function AdminSettingsPage() {
       icon: "🗣️",
     },
     {
-      label: "Zoom Client ID",
-      key: "ZOOM_CLIENT_ID",
-      value: "Configured ✓",
-      description: "Zoom OAuth App Client ID for RTMS audio streaming and meeting bot integration.",
+      label: "LLM Model",
+      key: "OLLAMA_MODEL",
+      value: caps?.llm_model ?? "…",
+      description: "Ollama model used for notes, decisions and task extraction. qwen2.5:7b handles Urdu far better than llama3.2:3b.",
+      editable: false,
+      icon: "🧠",
+    },
+    {
+      label: "Meeting Platforms",
+      key: "PLATFORMS",
+      value: (caps?.platforms ?? []).join(", ") || "…",
+      description: "Platforms the assistant's own browser agent can join. No vendor app, OAuth or webhook is used.",
       editable: false,
       icon: "📹",
+    },
+    {
+      label: "Browser Automation",
+      key: "PLAYWRIGHT",
+      value: installed(caps?.browser_automation, "run `playwright install chromium`"),
+      description: "Required for the assistant to actually join meetings. Without it, joins fall back to simulated mode.",
+      editable: false,
+      icon: "🌐",
+    },
+    {
+      label: "Virtual Audio Devices",
+      key: "SOUNDDEVICE",
+      value: installed(caps?.audio_devices, "install sounddevice + a virtual audio cable"),
+      description: "Required to hear the meeting and to speak Ava's replies into it. See docs/browser-bot-setup.md.",
+      editable: false,
+      icon: "🎚️",
     },
     {
       label: "Database URL",
@@ -110,16 +141,22 @@ ACCESS_TOKEN_EXPIRE_MINUTES=30
 
 # AI (Ollama)
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2
+OLLAMA_MODEL=qwen2.5:7b
 
-# Whisper
-WHISPER_MODEL=base
+# Whisper (Urdu + English)
+WHISPER_MODEL=small
 WHISPER_CPU_THREADS=4
+# Blank = auto-detect Urdu vs English, then lock onto it for the meeting.
+WHISPER_LANGUAGE=
 
-# Zoom RTMS
-ZOOM_CLIENT_ID=your_zoom_client_id
-ZOOM_CLIENT_SECRET=your_zoom_client_secret
-ZOOM_WEBHOOK_SECRET_TOKEN=your_zoom_webhook_token
+# Meeting bot — joins Zoom / Google Meet through its own browser.
+# No Zoom Marketplace app, OAuth or RTMS webhook is needed.
+BOT_DISPLAY_NAME=Ava Notetaker
+BOT_HEADLESS=False
+BOT_JOIN_TIMEOUT_SECONDS=90
+BOT_UI_TIMEOUT_SECONDS=20
+BOT_MIC_CAPTURE_DEVICE=
+BOT_SPEAKER_PLAYBACK_DEVICE=
 
 # Admin
 ADMIN_EMAILS=admin@yourcompany.com,another@yourcompany.com
