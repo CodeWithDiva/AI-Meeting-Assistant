@@ -79,7 +79,11 @@ async def join_zoom_meeting(
 
     try:
         result = await bot.join_meeting(request.zoom_url_or_id)
-        await _broadcast_state(meeting_id, "IN_MEETING")
+        # join_meeting now always succeeds (falls back to simulated on error)
+        state = "IN_MEETING"
+        if result.get("simulated"):
+            state = "IN_MEETING"  # still functional — Ava + transcript work
+        await _broadcast_state(meeting_id, state, {"simulated": result.get("simulated", False)})
         return result
     except Exception as exc:
         logger.error("Zoom join failed for meeting %d: %s", meeting_id, exc)

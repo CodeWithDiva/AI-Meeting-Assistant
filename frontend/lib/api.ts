@@ -156,6 +156,8 @@ export interface AdminUser {
 
 export interface VoiceReplyResult {
   triggered?: boolean;
+  message?: string;
+  tip?: string;
   question: string;
   answer: string;
   audio_base64: string;
@@ -444,8 +446,8 @@ export const api = {
   },
 
   // Zoom Bot (Block 4)
-  async joinZoomMeeting(meetingId: number | string, zoomUrlOrId: string): Promise<{ status: string; message: string }> {
-    return apiRequest<{ status: string; message: string }>(`/api/zoom/join/${meetingId}`, {
+  async joinZoomMeeting(meetingId: number | string, zoomUrlOrId: string): Promise<{ status: string; message: string; simulated?: boolean }> {
+    return apiRequest<{ status: string; message: string; simulated?: boolean }>(`/api/zoom/join/${meetingId}`, {
       method: "POST",
       body: JSON.stringify({ zoom_url_or_id: zoomUrlOrId }),
     });

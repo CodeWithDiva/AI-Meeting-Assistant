@@ -19,15 +19,21 @@ if (-not (Test-Port 8000)) {
 }
 
 Set-Location $frontend
-npm run build
 
 if (-not (Test-Port 3000)) {
+    # Clean stale or corrupted build cache if present
+    if (Test-Path ".next") {
+        try {
+            Remove-Item -Recurse -Force ".next" -ErrorAction SilentlyContinue
+        } catch {}
+    }
+
     Start-Process powershell.exe -ArgumentList @(
         "-NoExit",
         "-Command",
-        "Set-Location '$frontend'; npm run start"
+        "Set-Location '$frontend'; npm run dev"
     )
-    Write-Host "Frontend starting on http://localhost:3000"
+    Write-Host "Frontend starting on http://localhost:3000 (Development mode with fast reload)"
 } else {
     Write-Host "Frontend already running on port 3000"
 }

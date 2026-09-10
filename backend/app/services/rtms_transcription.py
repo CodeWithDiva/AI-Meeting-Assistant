@@ -137,6 +137,21 @@ class RTMSTranscriptionPipeline:
                 ))
             meeting.transcript = f"{meeting.transcript or ''} {result.full_text}".strip()
             db.commit()
+
+        # Real-time WebSocket broadcasting for live UI display
+        try:
+            from app.services.ws_manager import ws_manager
+            for text in texts:
+                asyncio.create_task(
+                    ws_manager.broadcast(
+                        self.meeting_id,
+                        "transcript_live",
+                        {"speaker": "Speaker", "text": text},
+                    )
+                )
+        except Exception as exc:
+            logger.debug("Failed to broadcast transcript_live: %s", exc)
+
         self._offset += duration
         return texts
 

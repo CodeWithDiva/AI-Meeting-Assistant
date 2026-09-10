@@ -42,7 +42,9 @@ BOT_DISPLAY_NAME = os.getenv("BOT_DISPLAY_NAME", "Ava Notetaker")
 BOT_HEADLESS = os.getenv("BOT_HEADLESS", "False").strip().lower() in {"1", "true", "yes"}
 BOT_MIC_CAPTURE_DEVICE = os.getenv("BOT_MIC_CAPTURE_DEVICE") or None
 BOT_SPEAKER_PLAYBACK_DEVICE = os.getenv("BOT_SPEAKER_PLAYBACK_DEVICE") or None
-BOT_JOIN_TIMEOUT_MS = int(os.getenv("BOT_JOIN_TIMEOUT_SECONDS", "45")) * 1000
+BOT_JOIN_TIMEOUT_MS = int(os.getenv("BOT_JOIN_TIMEOUT_SECONDS", "60")) * 1000
+FIELD_TIMEOUT_MS = BOT_JOIN_TIMEOUT_MS  # how long we poll for the join form to render
+DEBUG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "debug")
 
 
 class _BrowserNotReadyError(Exception):
@@ -66,7 +68,11 @@ def parse_zoom_meeting(zoom_url_or_id: str) -> tuple[str, str | None]:
         digits = re.sub(r"\D", "", candidate)
         return digits, None
 
-    match = re.search(r"/j/(\d+)", parsed.path) or re.search(r"/wc/join/(\d+)", parsed.path)
+    match = (
+        re.search(r"/j/(\d+)", parsed.path)
+        or re.search(r"/wc/join/(\d+)", parsed.path)
+        or re.search(r"/wc/(\d+)/join", parsed.path)
+    )
     meeting_number = match.group(1) if match else re.sub(r"\D", "", parsed.path)
     query = parse_qs(parsed.query)
     password = (query.get("pwd") or [None])[0]
@@ -190,7 +196,14 @@ class BrowserMeetingBot:
                 # Auto-accepts the mic/camera permission prompt while still
                 # using the real OS-selected devices (the virtual audio
                 # cable) — NOT Chromium's fake device, which would be silent.
-                args=["--use-fake-ui-for-media-stream"],
+                args=[
+                    "--use-fake-ui-for-media-stream",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+                ignore_default_args=["--enable-automation"],
             )
         except Exception as exc:
             if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc):
@@ -198,38 +211,222 @@ class BrowserMeetingBot:
                     "Chromium not installed — run `playwright install chromium`"
                 ) from exc
             raise
-        self._context = await self._browser.new_context(permissions=["microphone", "camera"])
+        self._context = await self._browser.new_context(
+            permissions=["microphone", "camera"],
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+            timezone_id="America/New_York",
+        )
         self._page = await self._context.new_page()
 
-        join_url = f"https://app.zoom.us/wc/join/{meeting_number}"
+        # Evade Zoom's bot detection scripts (mask webdriver & mock standard browser properties)
+        await self._page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            window.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {},
+                app: {}
+            };
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
+            });
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+        """)
+
+        join_url = f"https://app.zoom.us/wc/{meeting_number}/join"
+        if password:
+            join_url = f"{join_url}?pwd={password}"
         await self._page.goto(join_url, timeout=BOT_JOIN_TIMEOUT_MS)
 
-        name_input = self._page.locator("input#inputname, input[name='inputname']")
-        await name_input.wait_for(timeout=BOT_JOIN_TIMEOUT_MS)
-        await name_input.fill(BOT_DISPLAY_NAME)
-
-        if password:
-            pwd_input = self._page.locator("input#inputpasscode, input[name='inputpasscode']")
-            if await pwd_input.count():
-                await pwd_input.fill(password)
-
-        join_btn = self._page.get_by_role("button", name=re.compile("join", re.I))
-        await join_btn.first.click()
-
+        # Handle cookie / TOS consent banners if shown
         try:
-            audio_btn = self._page.get_by_text(re.compile("join audio by computer", re.I))
-            await audio_btn.wait_for(timeout=BOT_JOIN_TIMEOUT_MS)
-            await audio_btn.click()
+            cookie_btn = self._page.get_by_role("button", name=re.compile("agree|accept|got it", re.I))
+            if await cookie_btn.count() > 0 and await cookie_btn.first.is_visible():
+                await cookie_btn.first.click()
         except Exception:
-            logger.warning(
-                "Could not auto-click 'Join Audio by Computer' for meeting %d — "
-                "the bot may be in the meeting without audio. Zoom's join UI "
-                "changes often; update the selector in browser_bot.py if this "
-                "keeps happening.",
-                self.meeting_id,
+            pass
+
+        # Handle "Join from your browser" link if redirected to client landing page
+        try:
+            join_from_browser = self._page.get_by_text(re.compile("join from your browser", re.I))
+            if await join_from_browser.count() > 0 and await join_from_browser.first.is_visible():
+                await join_from_browser.first.click()
+        except Exception:
+            pass
+
+        # Check if already in meeting or waiting room
+        if await self._is_already_in_meeting_or_waiting():
+            logger.info("Bot is already in meeting or waiting room for meeting %d", self.meeting_id)
+            await self._handle_audio_prompt()
+            return
+
+        # Passcode field (if not already handled via URL or session)
+        if password:
+            passcode_field = await self._find_field(
+                [
+                    self._page.get_by_label(re.compile("passcode", re.I)),
+                    self._page.get_by_placeholder(re.compile("passcode", re.I)),
+                    self._page.locator("input#inputpasscode"),
+                    self._page.locator("input[name='inputpasscode']"),
+                    self._page.locator("input[type='password']"),
+                ],
+                timeout_ms=10000,
+            )
+            if passcode_field:
+                await passcode_field.fill(password)
+
+        # Name field
+        name_field = await self._find_field(
+            [
+                self._page.get_by_label(re.compile("your name", re.I)),
+                self._page.get_by_placeholder(re.compile("your name", re.I)),
+                self._page.locator("input#inputname"),
+                self._page.locator("input[name='inputname']"),
+                self._page.locator("input[name='name']"),
+                self._page.locator("input[type='text']:not(#cdn_path)"),
+            ],
+            timeout_ms=BOT_JOIN_TIMEOUT_MS,
+        )
+
+        if not name_field:
+            if await self._is_already_in_meeting_or_waiting():
+                logger.info("Bot bypassed name prompt and entered meeting/waiting room directly.")
+                await self._handle_audio_prompt()
+                return
+            await self._capture_debug_info("name_field_not_found")
+            raise RuntimeError(
+                f"Could not find the 'Your Name' field on Zoom's join page for "
+                f"meeting {self.meeting_id}. Debug info saved to {DEBUG_DIR}/."
             )
 
+        await name_field.fill(BOT_DISPLAY_NAME)
+
+        # Join button
+        join_btn = await self._find_field(
+            [
+                self._page.get_by_role("button", name=re.compile("^(join|join meeting)$", re.I)),
+                self._page.locator("button.preview-join-button"),
+                self._page.locator("button[type='submit']"),
+                self._page.get_by_text(re.compile("^(join|join meeting)$", re.I)),
+            ],
+            timeout_ms=10000,
+        )
+        if join_btn:
+            await join_btn.click()
+        else:
+            logger.warning("Could not locate Join button — trying keyboard Enter")
+            await name_field.press("Enter")
+
+        # Handle post-join audio prompt / recording disclaimers
+        await self._handle_audio_prompt()
         logger.info("Browser bot is in meeting %s (app meeting %d)", meeting_number, self.meeting_id)
+
+    async def _is_already_in_meeting_or_waiting(self) -> bool:
+        """Check if Zoom has already transitioned into the meeting room or waiting room."""
+        if not self._page:
+            return False
+        indicators = [
+            self._page.get_by_text(re.compile("join audio by computer", re.I)),
+            self._page.get_by_text(re.compile("please wait, the meeting host will let you in", re.I)),
+            self._page.get_by_text(re.compile("waiting for the host to start", re.I)),
+            self._page.locator("#foot-bar"),
+            self._page.locator(".footer"),
+            self._page.get_by_role("button", name=re.compile("leave|end", re.I)),
+        ]
+        for item in indicators:
+            try:
+                if await item.count() > 0 and await item.first.is_visible():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _handle_audio_prompt(self) -> None:
+        """Handle 'Join Audio by Computer' and 'Got It' recording disclaimer prompts."""
+        if not self._page:
+            return
+        # Audio connect button
+        try:
+            audio_btn = await self._find_field(
+                [
+                    self._page.get_by_text(re.compile("join audio by computer", re.I)),
+                    self._page.get_by_role("button", name=re.compile("computer audio", re.I)),
+                    self._page.locator("button.join-audio-by-voip__join-btn"),
+                ],
+                timeout_ms=15000,
+            )
+            if audio_btn:
+                await audio_btn.click()
+                logger.info("Clicked 'Join Audio by Computer' for meeting %d", self.meeting_id)
+        except Exception as exc:
+            logger.debug("Audio prompt not needed or not found: %s", exc)
+
+        # Recording disclaimer / 'Got It' button
+        try:
+            got_it_btn = self._page.get_by_role("button", name=re.compile("got it|stay in meeting", re.I))
+            if await got_it_btn.count() > 0 and await got_it_btn.first.is_visible():
+                await got_it_btn.first.click()
+        except Exception:
+            pass
+
+    async def _find_field(self, candidates: list, timeout_ms: int = FIELD_TIMEOUT_MS) -> Any | None:
+        """Poll every 0.5s, trying ALL candidate locators on each pass, until
+        one becomes visible or timeout_ms elapses. Zoom's Web Client SPA can
+        sit on a "Joining Meeting..." loading spinner for a long time before
+        the actual form renders, so we poll patiently instead of failing
+        fast on any single locator's own short wait."""
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout_ms / 1000
+        while loop.time() < deadline:
+            for locator in candidates:
+                try:
+                    target = locator.first
+                    if await target.is_visible():
+                        return target
+                except Exception:
+                    continue
+            await asyncio.sleep(0.5)
+        return None
+
+    async def _capture_debug_info(self, reason: str) -> None:
+        """Save a screenshot + a dump of every <input> on the page so a failed
+        join can be diagnosed and the selectors fixed without needing the
+        user to manually reproduce and screenshot it again."""
+        if not self._page:
+            return
+        try:
+            os.makedirs(DEBUG_DIR, exist_ok=True)
+            stamp = asyncio.get_event_loop().time()
+            base = os.path.join(DEBUG_DIR, f"zoom_join_{self.meeting_id}_{reason}_{int(stamp)}")
+            await self._page.screenshot(path=f"{base}.png", full_page=True)
+            inputs = await self._page.eval_on_selector_all(
+                "input, button",
+                "els => els.map(e => ({tag: e.tagName, id: e.id, name: e.name, "
+                "type: e.type, placeholder: e.placeholder, "
+                "aria_label: e.getAttribute('aria-label'), text: e.innerText}))",
+            )
+            with open(f"{base}.txt", "w", encoding="utf-8") as f:
+                f.write(f"URL: {self._page.url}\n\n")
+                for item in inputs:
+                    f.write(f"{item}\n")
+            logger.error(
+                "Saved Zoom join debug info to %s.png / %s.txt (reason=%s)",
+                base, base, reason,
+            )
+        except Exception:
+            logger.exception("Failed to capture debug info for meeting %d", self.meeting_id)
 
     async def _cleanup_browser(self) -> None:
         try:

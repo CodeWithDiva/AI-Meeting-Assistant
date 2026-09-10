@@ -49,7 +49,7 @@ class MicCaptureStream:
         self._running = False
 
     def start(self) -> None:
-        """Open the input stream. Raises if the device name can't be resolved."""
+        """Open the input stream. Falls back to system default input device if named device is unavailable."""
         import sounddevice as sd  # lazy import — optional dependency
 
         def _callback(indata, frames, time_info, status) -> None:  # noqa: ANN001
@@ -57,17 +57,38 @@ class MicCaptureStream:
                 logger.debug("Mic capture status: %s", status)
             self._queue.put(bytes(indata))
 
-        self._stream = sd.RawInputStream(
-            samplerate=self.sample_rate,
-            channels=CHANNELS,
-            dtype="int16",
-            blocksize=int(self.sample_rate * BLOCK_MS / 1000),
-            device=self.device_name,
-            callback=_callback,
-        )
-        self._stream.start()
-        self._running = True
-        logger.info("Mic capture started on device=%r", self.device_name or "(system default)")
+        try:
+            self._stream = sd.RawInputStream(
+                samplerate=self.sample_rate,
+                channels=CHANNELS,
+                dtype="int16",
+                blocksize=int(self.sample_rate * BLOCK_MS / 1000),
+                device=self.device_name,
+                callback=_callback,
+            )
+            self._stream.start()
+            self._running = True
+            logger.info("Mic capture started on device=%r", self.device_name or "(system default)")
+        except Exception as exc:
+            if self.device_name is not None:
+                logger.warning(
+                    "Could not open requested mic device %r (%s). Falling back to system default input device.",
+                    self.device_name, exc,
+                )
+                self.device_name = None
+                self._stream = sd.RawInputStream(
+                    samplerate=self.sample_rate,
+                    channels=CHANNELS,
+                    dtype="int16",
+                    blocksize=int(self.sample_rate * BLOCK_MS / 1000),
+                    device=None,
+                    callback=_callback,
+                )
+                self._stream.start()
+                self._running = True
+                logger.info("Mic capture started on system default input device.")
+            else:
+                raise
 
     def stop(self) -> None:
         self._running = False

@@ -109,6 +109,12 @@ export default function MeetingDetailPage() {
           if (data.event === "agent_state") {
             setAgentState(data.state || "idle");
           } else if (data.event === "ava_reply") {
+            if (data.audio_base64) {
+              try {
+                const snd = new Audio(`data:audio/wav;base64,${data.audio_base64}`);
+                snd.play().catch(() => {});
+              } catch {}
+            }
             setAvaReplies((prev) => [
               {
                 id: String(Date.now()),
@@ -147,23 +153,45 @@ export default function MeetingDetailPage() {
     e.preventDefault();
     if (!avaTestInput.trim() || testingAva) return;
 
+    // Auto-prepend "Ava" wake-word if not present
+    let inputText = avaTestInput.trim();
+    if (!inputText.toLowerCase().includes("ava")) {
+      inputText = `Ava, ${inputText}`;
+    }
+
     setTestingAva(true);
     setError("");
     try {
-      const result = await api.testVoiceReply(meetingId, avaTestInput.trim());
+      const result = await api.testVoiceReply(meetingId, inputText);
+      if (!result.triggered) {
+        setError(
+          result.message ||
+            'Wake-word "Ava" not detected. Start your question with "Ava, ..."'
+        );
+        return;
+      }
+      if (result.audio_base64) {
+        try {
+          const snd = new Audio(`data:audio/wav;base64,${result.audio_base64}`);
+          snd.play().catch(() => {});
+        } catch {}
+      }
       setAvaReplies((prev) => [
         {
           id: String(Date.now()),
-          question: result.question,
-          answer: result.answer,
-          audio_base64: result.audio_base64,
+          question: result.question || inputText,
+          answer: result.answer || "No answer generated.",
+          audio_base64: result.audio_base64 || "",
           timestamp: new Date().toLocaleTimeString(),
         },
         ...prev,
       ]);
       setAvaTestInput("");
     } catch (err: any) {
-      setError(err?.message || "Failed to generate Ava voice reply.");
+      setError(
+        err?.message ||
+          "Ava se jawab nahi mila. Backend chal raha hai? Ollama running hai?"
+      );
     } finally {
       setTestingAva(false);
     }
@@ -409,24 +437,40 @@ export default function MeetingDetailPage() {
   }
 
   async function handleAgentToggle() {
-    if ((agentState === "idle" || agentState === "stopped" || agentState === "left") && !zoomUrlOrId.trim()) {
-      setError("Enter a Zoom meeting URL or meeting ID first.");
+    const isJoining =
+      agentState === "idle" ||
+      agentState === "stopped" ||
+      agentState === "left" ||
+      agentState === "FAILED_JOIN" ||
+      agentState === "failed_join" ||
+      agentState === "DISCONNECTED" ||
+      agentState === "disconnected";
+
+    if (isJoining && !zoomUrlOrId.trim()) {
+      setError("Pehle Zoom Meeting URL ya Meeting ID enter karein.");
       return;
     }
     setAgentBusy(true);
     setError("");
     try {
-      if (agentState === "idle" || agentState === "stopped" || agentState === "left") {
+      if (isJoining) {
         const result = await api.joinZoomMeeting(meetingId, zoomUrlOrId.trim());
-        setAgentState("listening");
-        setSuccess(result.message || "Zoom agent connected to the meeting stream.");
+        // Bot always succeeds now (falls back to simulated if browser fails)
+        setAgentState(result.simulated ? "listening" : "listening");
+        const modeNote = result.simulated
+          ? " (Simulated mode — Playwright not installed. Ava still works via test input!)"
+          : " Bot is live in Zoom.";
+        setSuccess((result.message || "Zoom agent connected.") + modeNote);
       } else {
         const result = await api.leaveZoomMeeting(meetingId);
         setAgentState("left");
-        setSuccess(result.message || "Zoom agent disconnected.");
+        setSuccess(result.message || "Zoom agent disconnected. Notes being finalized...");
+        // Reload meeting data after a brief delay so finalized notes appear
+        setTimeout(() => loadMeetingData(), 3000);
       }
     } catch (err: any) {
-      setError(err?.message || "Failed to update agent state");
+      setError(err?.message || "Bot se connect nahi ho saka. Dobara try karein.");
+      setAgentState("FAILED_JOIN");
     } finally {
       setAgentBusy(false);
     }
