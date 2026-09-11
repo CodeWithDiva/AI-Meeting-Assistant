@@ -45,6 +45,13 @@ class AgentJoinRequest(BaseModel):
         default=False,
         description="Store the meeting audio to disk. Requires participant consent.",
     )
+    display_name: str | None = Field(
+        default=None,
+        max_length=100,
+        description="mode='attach' only: your name, used to label your own voice "
+        "in the transcript (the other participants can't be named — attach mode "
+        "never reads the meeting UI). Defaults to your account name.",
+    )
 
 
 class AgentJoinResponse(BaseModel):
@@ -67,6 +74,10 @@ class AgentStatusResponse(BaseModel):
     active_speaker: str | None = None
     participants: list[str] = Field(default_factory=list)
     error: str | None = None
+    # Attach mode only: whether the user's own microphone is being captured
+    # (loopback alone only carries the other participants). None outside
+    # attach mode, where the field does not apply.
+    mic_captured: bool | None = None
 
 
 class AgentLeaveResponse(BaseModel):

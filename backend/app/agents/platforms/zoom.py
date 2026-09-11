@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import re
 from typing import Any
@@ -246,9 +247,43 @@ class ZoomJoinStrategy:
             logger.info("Connected Zoom computer audio.")
 
         await click_if_visible(page, r"got it|stay in meeting|continue", 3_000)
+        await self._unmute_for_replies(page)
         # Keeping the participants panel open is what makes the roster and the
         # active-speaker name readable from the DOM at all.
         await click_if_visible(page, r"^participants$", 3_000)
+
+    async def _unmute_for_replies(self, page: Any) -> None:
+        """Unmute the bot when its microphone is the reply cable.
+
+        Zoom joins web participants muted whenever the host has "mute on
+        entry" set. With BOT_VIRTUAL_MIC_LABEL configured the bot's mic only
+        ever carries the assistant's own spoken replies, so a muted bot means
+        the room never hears an answer even though the audio reached the cable.
+        Without a virtual mic, the bot's mic is the machine's real microphone
+        and is left alone. Only a control whose name starts with "unmute" is
+        clicked, so an already-live mic is never toggled off.
+        """
+        if not os.getenv("BOT_VIRTUAL_MIC_LABEL"):
+            return
+        button = await find_first_visible(
+            page,
+            [
+                page.get_by_role("button", name=re.compile(r"^\s*unmute", re.I)),
+                page.locator("button[aria-label^='unmute' i]"),
+            ],
+            timeout_ms=4_000,
+            poll_ms=250,
+        )
+        if button is None:
+            return  # already unmuted, or the host hides the control
+        try:
+            await button.click(timeout=3_000)
+            logger.info("Unmuted the bot so its spoken replies reach the meeting.")
+        except Exception:
+            logger.info(
+                "Could not unmute the bot in Zoom — spoken replies may not be heard.",
+                exc_info=True,
+            )
 
     async def _is_inside(self, page: Any) -> bool:
         """True once Zoom has moved past the pre-join screen."""

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.ai.ollama import _best_available, _installed_models
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import ActionItem, Decision, Meeting, Summary, TranscriptSegment, User
@@ -39,40 +40,84 @@ def _owned_meeting(meeting_id: int, user: User, db: Session) -> Meeting:
 
 
 async def _ask_llm(context_prompt: str, question: str) -> str:
-    """Ask Ollama with grounded context, falling back to rule-based contextual answer."""
+    """Ask Ollama with grounded context, falling back to a context-derived answer."""
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
     model = os.getenv("OLLAMA_MODEL", "llama3.2")
 
     system_msg = (
-        "You are an intelligent executive AI meeting assistant. "
-        "Answer the user's question accurately and concisely based strictly on the provided meeting context. "
-        "If the answer is not mentioned in the context, say 'This was not discussed in the meeting.'"
+        "You are Alina, an AI meeting assistant. Answer the question accurately "
+        "and briefly — one to three short sentences, since the answer may be "
+        "spoken aloud in the meeting — using ONLY the meeting context below. "
+        "Reply in the same language the question was asked in (English, Urdu, "
+        "or Roman Urdu). When asked who has a task, the owner is the person "
+        "the transcript names as doing it — '[Sara]: Ali will send the report' "
+        "means Ali's task, not Sara's. Do not start with your own name. If the "
+        "context does not contain the answer, say it was not discussed in the "
+        "meeting."
     )
-    full_prompt = f"{system_msg}\n\n{context_prompt}\n\nUser Question: {question}\nAnswer:"
+    full_prompt = f"{system_msg}\n\n{context_prompt}\n\nQuestion: {question}\nAnswer:"
+    payload = {
+        "model": model,
+        "prompt": full_prompt,
+        "stream": False,
+        # Low temperature keeps answers to what the transcript says; the token
+        # cap keeps a spoken reply short and bounds latency on a slow CPU.
+        "options": {"temperature": 0.2, "num_predict": 160},
+    }
 
     try:
-        async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(
-                f"{base_url}/api/generate",
-                json={"model": model, "prompt": full_prompt, "stream": False},
-            )
+        # A cold model load on a modest CPU measured ~25s before the first
+        # token, so the old 45s ceiling left little margin.
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(f"{base_url}/api/generate", json=payload)
+            if response.status_code == 404:
+                # The configured model isn't pulled. Previously this fell
+                # straight through to the canned fallback below, so the
+                # assistant "answered" every question with a stock sentence
+                # even though a perfectly usable model was installed.
+                substitute = _best_available(await _installed_models(client, base_url))
+                if substitute:
+                    logger.warning(
+                        "Ollama model %r is not installed — answering with %r. "
+                        "Run `ollama pull %s` for the intended quality.",
+                        model, substitute, model,
+                    )
+                    payload["model"] = substitute
+                    response = await client.post(f"{base_url}/api/generate", json=payload)
             response.raise_for_status()
-            res_data = response.json()
-            answer = res_data.get("response", "").strip()
+            answer = response.json().get("response", "").strip()
             if answer:
                 return answer
     except Exception as exc:
         logger.warning("Ollama chat query unavailable: %s. Using contextual fallback.", exc)
 
-    # Fallback contextual extraction
+    return _fallback_answer(context_prompt, question)
+
+
+def _fallback_answer(context_prompt: str, question: str) -> str:
+    """Answer from the context itself when no LLM is reachable.
+
+    The old fallback returned the same stock sentence ("refer to the tab")
+    whatever was asked, which sounds like an answer but tells nobody anything.
+    This quotes what the context actually holds for the kind of question asked.
+    """
+    lines = {
+        key: value.strip()
+        for key, _, value in (line.partition(": ") for line in context_prompt.splitlines())
+        if key in {"Decisions", "Action Items", "Summary"} and value.strip()
+    }
     q_lower = question.lower()
-    if "decision" in q_lower or "agree" in q_lower:
-        return "Based on the transcript analysis, the main consensus points discussed were documented in the Decisions section."
-    if "task" in q_lower or "action" in q_lower or "who" in q_lower or "assign" in q_lower:
-        return "Action items and deliverables identified from the meeting are listed in the Action Items tab."
-    if "summary" in q_lower or "about" in q_lower or "overview" in q_lower:
-        return "The meeting focused on the topics recorded in the Executive Summary and transcript timeline."
-    return "Based on the meeting transcript, this point was discussed as part of the session recording. Refer to the transcript segments for full details."
+    wants = [
+        ("Decisions", ("decid", "decision", "agree", "faisla", "tay")),
+        ("Action Items", ("task", "action", "assign", "who", "kaam", "kis ne", "kisko")),
+        ("Summary", ("summary", "about", "overview", "khulasa", "kya baat")),
+    ]
+    for key, words in wants:
+        if any(w in q_lower for w in words) and key in lines:
+            return f"{key}: {lines[key]}"
+    if "Summary" in lines:
+        return lines["Summary"]
+    return "I don't have enough from this meeting yet to answer that."
 
 
 @router.post("/ask", response_model=QuestionResponse)

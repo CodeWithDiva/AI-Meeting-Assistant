@@ -30,6 +30,7 @@ machine running the bot (see docs/browser-bot-setup.md):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -72,10 +73,73 @@ BOT_BROWSER_PROFILE_DIR = (
 # browser is 100% a normal one you opened.
 BOT_CDP_URL = os.getenv("BOT_CDP_URL") or None
 
+# The input device the bot's own browser uses as its microphone — the recording
+# side of the cable that BOT_SPEAKER_PLAYBACK_DEVICE plays the assistant's
+# replies into. Without this, Chromium silently takes the *Windows default*
+# microphone, which on a machine where a person is also in the call means the
+# bot re-broadcasts that person's voice under the bot's name, and the
+# assistant's own spoken replies never reach the meeting at all. Matched as a
+# case-insensitive substring of the device label the browser reports.
+BOT_VIRTUAL_MIC_LABEL = os.getenv("BOT_VIRTUAL_MIC_LABEL") or None
+
+# Injected before any page script: routes every microphone request the meeting
+# client makes to BOT_VIRTUAL_MIC_LABEL, whatever device it asked for. Echo
+# cancellation / noise suppression / auto-gain are turned off for that device
+# because they treat a clean synthesized voice as something to suppress.
+_VIRTUAL_MIC_SCRIPT = """
+(() => {
+  const LABEL = __LABEL__;
+  const md = navigator.mediaDevices;
+  if (!LABEL || !md || !md.getUserMedia) return;
+  const original = md.getUserMedia.bind(md);
+  let cachedId = null;
+
+  async function findDevice() {
+    if (cachedId) return cachedId;
+    const match = (list) => list.find((d) => d.kind === 'audioinput' && d.label
+      && d.label.toLowerCase().includes(LABEL.toLowerCase()));
+    try {
+      let hit = match(await md.enumerateDevices());
+      if (!hit) {
+        // Device labels stay blank until the page has used a microphone once.
+        const probe = await original({ audio: true });
+        probe.getTracks().forEach((t) => t.stop());
+        hit = match(await md.enumerateDevices());
+      }
+      if (hit) cachedId = hit.deviceId;
+    } catch (e) {}
+    return cachedId;
+  }
+
+  md.getUserMedia = async (constraints) => {
+    if (constraints && constraints.audio) {
+      const id = await findDevice();
+      if (id) {
+        const base = typeof constraints.audio === 'object' ? constraints.audio : {};
+        constraints = Object.assign({}, constraints, {
+          audio: Object.assign({}, base, {
+            deviceId: { exact: id },
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          }),
+        });
+      }
+    }
+    return original(constraints);
+  };
+})();
+"""
+
 # How often the bot re-reads the meeting UI for who is talking. Fast enough to
 # attribute a short sentence, slow enough not to fight the render loop.
 SPEAKER_POLL_SECONDS = 1.5
 DEBUG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "debug")
+
+# How long to let an in-flight transcription finish naturally when the user
+# leaves, before giving up and cancelling it outright. Whisper `small` on a
+# modest CPU has measured 20+ seconds for a single utterance.
+STOP_GRACE_SECONDS = 45
 
 
 class _BrowserNotReadyError(Exception):
@@ -177,18 +241,43 @@ class BrowserMeetingBot:
         """Leave the meeting, finalize notes, and close the browser."""
         self.status = "leaving"
 
-        for task in (self._audio_task, self._speaker_task):
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-        self._audio_task = self._speaker_task = None
+        # The DOM-polling task is safe to cut off immediately — it holds no
+        # in-flight work worth keeping.
+        if self._speaker_task:
+            self._speaker_task.cancel()
+            try:
+                await self._speaker_task
+            except asyncio.CancelledError:
+                pass
+            self._speaker_task = None
 
+        # The audio task is different: Whisper now runs off the event loop
+        # (so it no longer freezes the server), but a single utterance can
+        # still take 10-20+ seconds on a modest CPU. Cancelling it immediately
+        # — the old behaviour — could cut a transcription off mid-flight and
+        # lose whatever was just said, right as someone hits "leave". Stop new
+        # audio from arriving first, then give the loop a grace window to
+        # finish whatever it was already transcribing before force-cancelling.
         if self._mic_stream:
             self._mic_stream.stop()
             self._mic_stream = None
+
+        if self._audio_task:
+            try:
+                await asyncio.wait_for(self._audio_task, timeout=STOP_GRACE_SECONDS)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Meeting %d: audio loop still busy after %ds — cancelling it.",
+                    self.meeting_id, STOP_GRACE_SECONDS,
+                )
+                self._audio_task.cancel()
+                try:
+                    await self._audio_task
+                except asyncio.CancelledError:
+                    pass
+            except asyncio.CancelledError:
+                pass
+            self._audio_task = None
 
         report = {}
         if self._pipeline:
@@ -229,7 +318,27 @@ class BrowserMeetingBot:
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--start-maximized",
-        "--disable-features=IsolateOrigins,site-per-process",
+        "--no-first-run",
+        "--no-default-browser-check",
+        # Chrome's own "Restore pages?" bubble fires whenever a profile's last
+        # exit wasn't clean (including a force-killed Chrome from a previous
+        # crashed run) and steals focus over the join form.
+        "--disable-session-crashed-bubble",
+        "--disable-features="
+        # Windows' native window-occlusion tracking makes Chrome stop
+        # rendering (paint solid black) when it thinks the window isn't
+        # visible — trivially true for an unfocused/background automation
+        # window. This is the documented fix for "Chrome renders black" under
+        # Playwright/Selenium on Windows.
+        "CalculateNativeWinOcclusion,"
+        "IsolateOrigins,"
+        "site-per-process",
+        # A background-ish automation window otherwise gets Chrome's
+        # power-saving throttling, which can stall Meet/Zoom's own rendering
+        # and audio timers.
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
     ]
 
     # Injected before any page script runs. Meeting clients (Zoom especially)
@@ -295,6 +404,16 @@ class BrowserMeetingBot:
         pages = self._context.pages
         self._page = pages[0] if pages else await self._context.new_page()
         await self._page.add_init_script(self._STEALTH_SCRIPT)
+        if BOT_VIRTUAL_MIC_LABEL:
+            await self._page.add_init_script(
+                _VIRTUAL_MIC_SCRIPT.replace("__LABEL__", json.dumps(BOT_VIRTUAL_MIC_LABEL))
+            )
+            logger.info("Bot microphone pinned to input device matching %r.", BOT_VIRTUAL_MIC_LABEL)
+        else:
+            logger.warning(
+                "BOT_VIRTUAL_MIC_LABEL is not set — the bot's browser will use the "
+                "Windows default microphone, so spoken replies won't reach the meeting."
+            )
 
     async def _attach_over_cdp(self, context_opts: dict[str, Any]) -> None:
         """Use a Chrome the user started with --remote-debugging-port."""
@@ -476,19 +595,29 @@ class BrowserMeetingBot:
     # ------------------------------------------------------------------
 
     def _start_audio_pipeline(self) -> None:
-        from app.audio.device_io import MicCaptureStream
+        from app.agents.audio_capture import build_capture_stream, capture_device_hint
         from app.services.live_pipeline import LiveMeetingPipeline
         from app.services.voice_assistant import AvaVoiceAssistant
 
         self._pipeline = LiveMeetingPipeline(
-            self.meeting_id, speaker_resolver=lambda: self._active_speaker
+            self.meeting_id,
+            speaker_resolver=lambda: self._active_speaker,
+            on_text=self._handle_text,
         )
         self._voice_assistant = AvaVoiceAssistant(
             self.meeting_id, on_audio_out=self._speak_reply
         )
 
         try:
-            self._mic_stream = MicCaptureStream(BOT_MIC_CAPTURE_DEVICE)
+            # Same capture source as attach mode: by default a WASAPI loopback
+            # of the speaker output, which is where this bot's own Chromium
+            # window plays the meeting. The older cable-only path needed
+            # Windows' default playback device repointed at a virtual cable,
+            # which silenced every other app (including the user's own Zoom
+            # client) for as long as the bot ran.
+            self._mic_stream = build_capture_stream(
+                mic_speaker_name=BOT_DISPLAY_NAME, other_speaker_name="Participant"
+            )
             self._mic_stream.start()
         except ModuleNotFoundError as exc:
             logger.warning(
@@ -499,23 +628,38 @@ class BrowserMeetingBot:
             self._mic_stream = None
         except Exception:
             logger.exception(
-                "Could not open mic capture device %r for meeting %d — check "
-                "BOT_MIC_CAPTURE_DEVICE in .env against "
-                "`python scripts/list_audio_devices.py`.",
-                BOT_MIC_CAPTURE_DEVICE, self.meeting_id,
+                "Could not start audio capture for meeting %d — %s",
+                self.meeting_id, capture_device_hint(),
             )
             self._mic_stream = None
 
         if self._mic_stream is not None:
             self._audio_task = asyncio.create_task(self._audio_loop())
 
+    async def _handle_text(self, text: str) -> None:
+        """One finished transcript line — let the wake-word assistant see it."""
+        if self._voice_assistant:
+            await self._voice_assistant.handle_transcript(text)
+
     async def _audio_loop(self) -> None:
         assert self._mic_stream is not None and self._pipeline is not None
         try:
             async for chunk in self._mic_stream.chunks():
-                texts = await self._pipeline.add_chunk(chunk)
-                for text in texts:
-                    await self._voice_assistant.handle_transcript(text)
+                # One bad utterance (a transient file lock, a Whisper hiccup)
+                # must not silently end transcription for the rest of the
+                # meeting — handle it per-chunk instead of letting a single
+                # exception break the whole `async for`.
+                try:
+                    # Returns immediately — finished lines arrive via
+                    # _handle_text once the pipeline's worker transcribes them.
+                    await self._pipeline.add_chunk(chunk)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Skipped one audio chunk for meeting %d after an error; "
+                        "still listening.", self.meeting_id,
+                    )
         except asyncio.CancelledError:
             pass
         except Exception:

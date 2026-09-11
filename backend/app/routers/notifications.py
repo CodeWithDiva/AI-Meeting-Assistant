@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -25,31 +25,48 @@ class NotificationResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+def _serialize(n: Notification) -> NotificationResponse:
+    return NotificationResponse(
+        id=n.id,
+        user_id=n.user_id,
+        meeting_id=n.meeting_id,
+        type=n.type,
+        title=n.title,
+        body=n.body,
+        read=n.read,
+        created_at=n.created_at.isoformat() if n.created_at else None,
+    )
+
+
 @router.get("", response_model=list[NotificationResponse])
 def get_user_notifications(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     unread_only: bool = False,
+    limit: int = 30,
 ):
     query = select(Notification).where(Notification.user_id == user.id)
     if unread_only:
-        query = query.where(Notification.read == False)
-    query = query.order_by(desc(Notification.created_at)).limit(20)
+        query = query.where(Notification.read == False)  # noqa: E712
+    # `created_at` has one-second resolution, so the id breaks ties and the
+    # newest notification is reliably first.
+    query = query.order_by(desc(Notification.created_at), desc(Notification.id)).limit(
+        max(1, min(limit, 100))
+    )
+    return [_serialize(n) for n in db.scalars(query)]
 
-    notifs = list(db.scalars(query))
-    return [
-        NotificationResponse(
-            id=n.id,
-            user_id=n.user_id,
-            meeting_id=n.meeting_id,
-            type=n.type,
-            title=n.title,
-            body=n.body,
-            read=n.read,
-            created_at=n.created_at.isoformat() if n.created_at else None,
+
+@router.get("/unread-count")
+def unread_count(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    count = db.scalar(
+        select(func.count(Notification.id)).where(
+            Notification.user_id == user.id, Notification.read == False  # noqa: E712
         )
-        for n in notifs
-    ]
+    )
+    return {"unread": count or 0}
 
 
 @router.patch("/{notification_id}/read", response_model=NotificationResponse)
@@ -69,16 +86,7 @@ def mark_notification_read(
     notif.read = True
     db.commit()
     db.refresh(notif)
-    return NotificationResponse(
-        id=notif.id,
-        user_id=notif.user_id,
-        meeting_id=notif.meeting_id,
-        type=notif.type,
-        title=notif.title,
-        body=notif.body,
-        read=notif.read,
-        created_at=notif.created_at.isoformat() if notif.created_at else None,
-    )
+    return _serialize(notif)
 
 
 @router.post("/mark-all-read")
@@ -89,7 +97,7 @@ def mark_all_notifications_read(
     notifs = list(
         db.scalars(
             select(Notification).where(
-                Notification.user_id == user.id, Notification.read == False
+                Notification.user_id == user.id, Notification.read == False  # noqa: E712
             )
         )
     )

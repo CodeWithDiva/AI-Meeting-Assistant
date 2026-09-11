@@ -130,10 +130,11 @@ async def test_voice_reply(
     reply = await assistant.handle_transcript(request.text)
 
     if not reply:
+        name = assistant.wake_words[0].title()
         return {
             "triggered": False,
-            "message": "Wake-word 'Ava' not detected in the provided text.",
-            "tip": "Include 'Ava' in your text, e.g. 'Ava, what was decided?'",
+            "message": f"Wake word '{name}' not detected in the provided text.",
+            "tip": f"Start with the assistant's name, e.g. '{name}, what was decided?'",
         }
 
     # Cache for polling endpoint

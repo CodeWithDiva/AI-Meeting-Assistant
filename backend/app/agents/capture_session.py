@@ -23,19 +23,13 @@ from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
-# "loopback" — capture whatever plays on the speakers/headphones the user
-#   already listens on (WASAPI loopback). No Windows or Zoom audio settings to
-#   change. Default for attach mode.
-# "cable"    — capture from BOT_MIC_CAPTURE_DEVICE (the virtual audio cable the
-#   browser bot uses). Requires the meeting audio to be routed into that cable.
-CAPTURE_MODE = os.getenv("BOT_CAPTURE_MODE", "loopback").strip().lower()
-# Optional: a specific output device to loop back from. Blank = current default.
-LOOPBACK_DEVICE = os.getenv("BOT_LOOPBACK_DEVICE") or None
-# In loopback mode, also capture the user's own microphone and mix it in —
-# loopback alone carries only the *other* participants. Default on.
-MIX_MIC = os.getenv("BOT_MIX_MIC", "true").strip().lower() not in {"0", "false", "no"}
-# Optional: which input device is the user's mic. Blank = system default input.
-MIC_INPUT_DEVICE = os.getenv("BOT_MIC_INPUT_DEVICE") or None
+# How long to let an in-flight transcription finish naturally when the user
+# leaves, before giving up and cancelling it outright. Whisper `small` on a
+# modest CPU has measured 20+ seconds for a single utterance.
+STOP_GRACE_SECONDS = 45
+
+# Which audio source to capture lives in app.agents.audio_capture, shared with
+# the browser bot so the two modes cannot drift apart.
 
 
 class CaptureSession:
@@ -46,10 +40,21 @@ class CaptureSession:
     either kind of session in the same registry.
     """
 
-    def __init__(self, meeting_id: int, user_id: int, *, enable_voice: bool = True) -> None:
+    def __init__(
+        self,
+        meeting_id: int,
+        user_id: int,
+        *,
+        enable_voice: bool = True,
+        display_name: str | None = None,
+    ) -> None:
         self.meeting_id = meeting_id
         self.user_id = user_id
         self.enable_voice = enable_voice
+        # What your own voice is labelled as in the transcript. The other
+        # side of the call has no name to attribute (attach mode never reads
+        # the meeting UI), so it's labelled generically.
+        self.display_name = (display_name or "").strip() or "You"
         self.status = "idle"  # idle -> listening -> leaving -> left
         self.is_connected = False
         self._simulated = False
@@ -58,6 +63,10 @@ class CaptureSession:
         self._pipeline = None
         self._voice_assistant = None
         self._audio_task: asyncio.Task | None = None
+        # Whether the user's own mic was actually captured (attach + loopback
+        # mode) — set once start() runs. See get_status().
+        self.mic_captured = False
+        self.mic_error: str | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -65,16 +74,25 @@ class CaptureSession:
 
     async def start(self) -> dict[str, Any]:
         """Open the capture device and begin transcribing."""
-        from app.agents.browser_bot import (
-            BOT_MIC_CAPTURE_DEVICE,
+        from app.agents.audio_capture import (
             BOT_SPEAKER_PLAYBACK_DEVICE,
+            CAPTURE_MODE,
+            MIX_MIC,
+            build_capture_stream,
+            capture_device_hint,
         )
-        from app.audio.device_io import MicCaptureStream
         from app.services.live_pipeline import LiveMeetingPipeline
         from app.services.voice_assistant import AvaVoiceAssistant
 
         self.status = "joining"
-        self._pipeline = LiveMeetingPipeline(self.meeting_id)
+        # Label each transcript line with whichever source (your mic vs. the
+        # loopback) was louder for that utterance — see MicCaptureStream's
+        # last_speaker_label / _mix_in_mic.
+        self._pipeline = LiveMeetingPipeline(
+            self.meeting_id,
+            speaker_resolver=lambda: getattr(self._mic_stream, "last_speaker_label", None),
+            on_text=self._handle_text,
+        )
         if self.enable_voice:
             self._voice_assistant = AvaVoiceAssistant(
                 self.meeting_id, on_audio_out=self._speak_reply
@@ -82,14 +100,8 @@ class CaptureSession:
             self._playback_device = BOT_SPEAKER_PLAYBACK_DEVICE
 
         use_loopback = CAPTURE_MODE != "cable"
-        device = LOOPBACK_DEVICE if use_loopback else BOT_MIC_CAPTURE_DEVICE
         try:
-            self._mic_stream = MicCaptureStream(
-                device,
-                loopback=use_loopback,
-                mix_mic=use_loopback and MIX_MIC,
-                mic_device=MIC_INPUT_DEVICE,
-            )
+            self._mic_stream = build_capture_stream(mic_speaker_name=self.display_name)
             self._mic_stream.start()
         except ModuleNotFoundError as exc:
             logger.warning(
@@ -99,20 +111,7 @@ class CaptureSession:
             self._simulated = True
         except Exception as exc:
             self.status = "FAILED_JOIN"
-            if use_loopback:
-                hint = (
-                    "Could not start loopback capture of the speaker output. "
-                    "Set BOT_LOOPBACK_DEVICE in .env to the exact name of the device "
-                    "you hear the meeting on (see "
-                    "`python scripts/list_audio_devices.py`), or set "
-                    "BOT_CAPTURE_MODE=cable to use the virtual audio cable instead."
-                )
-            else:
-                hint = (
-                    f"Could not open the capture device {BOT_MIC_CAPTURE_DEVICE!r}. "
-                    "Check BOT_MIC_CAPTURE_DEVICE in .env against "
-                    "`python scripts/list_audio_devices.py`."
-                )
+            hint = f"Could not start audio capture — {capture_device_hint()}"
             raise RuntimeError(f"{hint} ({exc})") from exc
 
         await self._record_listener_participant()
@@ -120,35 +119,77 @@ class CaptureSession:
         if self._mic_stream is not None:
             self._audio_task = asyncio.create_task(self._audio_loop())
 
+        # Cache mic status now — leave_meeting() nulls out _mic_stream.
+        wants_mic = use_loopback and MIX_MIC and not self._simulated
+        self.mic_captured = bool(self._mic_stream and getattr(self._mic_stream, "mic_active", False))
+        self.mic_error = getattr(self._mic_stream, "mic_error", None) if self._mic_stream else None
+
         self.status = "listening"
         self.is_connected = True
+        message = (
+            "Listening to the meeting through the capture device."
+            if not self._simulated
+            else "Audio hardware not available — capture session is simulated."
+        )
+        if wants_mic and not self.mic_captured:
+            message += (
+                " Warning: your own microphone could not be captured "
+                f"({self.mic_error or 'unknown error'}) — only what plays through "
+                "your speakers (the other participants) will be transcribed."
+            )
+            logger.warning(
+                "Meeting %d: mic not captured in attach mode — %s",
+                self.meeting_id, self.mic_error,
+            )
         return {
             "status": "listening",
             "meeting_id": self.meeting_id,
             "mode": "attach",
             "simulated": self._simulated,
-            "message": (
-                "Listening to the meeting through the capture device."
-                if not self._simulated
-                else "Audio hardware not available — capture session is simulated."
-            ),
+            "mic_captured": self.mic_captured,
+            "message": message,
         }
 
     async def leave_meeting(self) -> dict[str, Any]:
         """Stop listening and finalize notes, decisions and tasks."""
         self.status = "leaving"
 
+        # Whisper now runs off the event loop (so it no longer freezes the
+        # server), but a single utterance can still take 10-20+ seconds on a
+        # modest CPU. Cancelling the audio task immediately — the old
+        # behaviour — could cut that transcription off mid-flight and lose
+        # whatever was just said, right when someone hits "leave". Stop new
+        # audio from arriving first, then give the loop a grace window to
+        # finish whatever it was already transcribing before force-cancelling.
+        #
+        # `self._mic_stream` is left set (only `.stop()` is called here, not
+        # nulled) until the audio task actually finishes: the speaker_resolver
+        # passed to LiveMeetingPipeline reads `self._mic_stream.last_speaker_label`
+        # on every call, including for whatever utterance is still in flight —
+        # clearing the reference early made every in-flight transcription at
+        # leave time land as the generic "Speaker" instead of "You"/"Participant".
+        stream_to_stop = self._mic_stream
+        if stream_to_stop:
+            stream_to_stop.stop()
+
         if self._audio_task:
-            self._audio_task.cancel()
             try:
-                await self._audio_task
+                await asyncio.wait_for(self._audio_task, timeout=STOP_GRACE_SECONDS)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Meeting %d: audio loop still busy after %ds — cancelling it.",
+                    self.meeting_id, STOP_GRACE_SECONDS,
+                )
+                self._audio_task.cancel()
+                try:
+                    await self._audio_task
+                except asyncio.CancelledError:
+                    pass
             except asyncio.CancelledError:
                 pass
             self._audio_task = None
 
-        if self._mic_stream:
-            self._mic_stream.stop()
-            self._mic_stream = None
+        self._mic_stream = None
 
         report: dict[str, Any] = {}
         if self._pipeline:
@@ -174,6 +215,7 @@ class CaptureSession:
             "simulated": self._simulated,
             "active_speaker": "Speaker",
             "participants": [],
+            "mic_captured": self.mic_captured if self.is_connected else None,
         }
 
     # ------------------------------------------------------------------
@@ -184,14 +226,31 @@ class CaptureSession:
         assert self._mic_stream is not None and self._pipeline is not None
         try:
             async for chunk in self._mic_stream.chunks():
-                texts = await self._pipeline.add_chunk(chunk)
-                if self._voice_assistant:
-                    for text in texts:
-                        await self._voice_assistant.handle_transcript(text)
+                # A single bad utterance (a transient file-lock, a Whisper
+                # hiccup) must not take down capture for the rest of the
+                # meeting — that previously went quiet with no visible sign
+                # beyond "the transcript stopped". Handle per-chunk instead
+                # of letting one exception end the whole `async for`.
+                try:
+                    # Returns immediately — finished lines arrive via
+                    # _handle_text once the pipeline's worker transcribes them.
+                    await self._pipeline.add_chunk(chunk)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Skipped one audio chunk for meeting %d after an error; "
+                        "still listening.", self.meeting_id,
+                    )
         except asyncio.CancelledError:
             pass
         except Exception:
             logger.exception("Capture audio loop crashed for meeting %d", self.meeting_id)
+
+    async def _handle_text(self, text: str) -> None:
+        """One finished transcript line — let the wake-word assistant see it."""
+        if self._voice_assistant:
+            await self._voice_assistant.handle_transcript(text)
 
     async def _speak_reply(self, wav_bytes: bytes) -> None:
         from app.audio.device_io import play_wav_bytes

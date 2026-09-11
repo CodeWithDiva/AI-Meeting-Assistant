@@ -19,9 +19,11 @@ Three things make or break Urdu accuracy here, and all three are handled below:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -29,6 +31,22 @@ from typing import Protocol
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "small"
+
+# Lower = faster, less accurate. 2 is a middle ground for live transcription on
+# a modest CPU; raise it (env WHISPER_BEAM_SIZE) if the machine can keep up.
+try:
+    _BEAM_SIZE = max(1, int(os.getenv("WHISPER_BEAM_SIZE", "2")))
+except ValueError:
+    _BEAM_SIZE = 2
+
+# Per-segment confidence floor. Whisper reports an average log-probability for
+# each segment; real speech lands well above this, while words invented to fit
+# noise score below it. Raise it (towards 0) to be stricter about inventions at
+# the cost of dropping some genuine quiet speech.
+try:
+    _MIN_AVG_LOGPROB = float(os.getenv("WHISPER_MIN_LOGPROB", "-0.9"))
+except ValueError:
+    _MIN_AVG_LOGPROB = -0.9
 
 # If the configured model can't be loaded (usually out of memory on a busy CPU
 # box — `small` needs noticeably more RAM than `base`), fall back down this chain
@@ -45,27 +63,24 @@ _MODEL_FALLBACKS = {
 # Whisper emits these on silence/noise rather than admitting it heard nothing.
 # Matched against the whole normalized segment, so real sentences that merely
 # contain "thank you" are unaffected.
+#
+# The "this is a business meeting" family is here for a specific reason: an
+# earlier version passed a priming sentence as `initial_prompt` to steer
+# Whisper towards meeting vocabulary, and on unclear audio Whisper simply
+# echoed that prompt back as if it had been spoken. The prompt is gone now
+# (see `_transcribe_blocking`), but these stay as a backstop.
 _HALLUCINATIONS = {
     "thank you", "thank you.", "thanks for watching", "thanks for watching!",
     "you", "bye", "bye.", ".", "..", "...", "okay", "ok",
     "subtitles by the amara.org community", "amara.org",
     "please subscribe", "subscribe", "music", "applause",
+    "this is a business meeting", "this is a business meeting.",
+    "the team is discussing the project",
     "شکریہ", "شکریہ۔", "بہت شکریہ", "آپ کا شکریہ",
     "الله", "اللہ", "سبسکرائب",
+    "یہ ایک آفس میٹنگ ہے", "یہ ایک آفس میٹنگ ہے۔",
 }
 _PUNCT_ONLY = re.compile(r"^[\s\W_]+$", re.UNICODE)
-
-# Nudges Whisper towards natural mixed Urdu/English business speech instead of
-# forcing everything into one script. Whisper conditions on this as if it were
-# the previous sentence, so it must read like real meeting speech.
-_URDU_PRIMER = (
-    "یہ ایک آفس میٹنگ ہے۔ ٹیم پروجیکٹ، ڈیڈلائن، ٹاسک اور رپورٹ پر بات کر رہی ہے۔ "
-    "Ali, deadline Friday tak hai. Client ko update bhej dena."
-)
-_ENGLISH_PRIMER = (
-    "This is a business meeting. The team is discussing the project, "
-    "deadlines, action items and who owns each task."
-)
 
 
 @dataclass
@@ -200,27 +215,88 @@ class FasterWhisperService:
             language: Force a language for this call (e.g. from
                 :class:`StickyLanguage`). Falls back to the service-level
                 setting, then to Whisper's own detection.
+
+        faster-whisper's `model.transcribe()` is a blocking, CPU-bound call —
+        `raw_segments` is a lazy generator, so the real decoding work happens
+        while iterating it. Doing that inline on the event loop stalls the
+        *entire server* for however long Whisper takes (Urdu, with its longer
+        initial prompt and RTL script, is exactly when this got bad enough to
+        look like the live transcript — and every other request — had hung).
+        So the call and the full iteration run together in a worker thread.
         """
         model = self._load_model()
         target = language or self.language
+        loop = asyncio.get_event_loop()
+        start = time.monotonic()
+        result = await loop.run_in_executor(None, self._transcribe_blocking, model, audio_path, target)
+        elapsed = time.monotonic() - start
+        if elapsed > 3:
+            logger.warning(
+                "Whisper took %.1fs for a single window (model=%r, lang=%r) — "
+                "live transcription will lag behind real time by roughly that much.",
+                elapsed, self.model_size, target,
+            )
+        else:
+            logger.debug("Whisper transcribed a window in %.2fs (lang=%r).", elapsed, target)
+        return result
+
+    def _transcribe_blocking(self, model, audio_path: Path, target: str | None) -> TranscriptResult:  # noqa: ANN001
+        """The actual CPU-bound work — always call this off the event loop."""
         raw_segments, info = model.transcribe(
             str(audio_path),
             language=target,
             task="transcribe",  # never translate — Urdu must stay Urdu
-            beam_size=5,
+            # Live transcription competes with real time, so beam width trades
+            # accuracy for speed here. Override with WHISPER_BEAM_SIZE on a
+            # bigger machine.
+            beam_size=_BEAM_SIZE,
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 400},
+            # Keep quiet/soft speech: the VAD's job here is only to drop dead
+            # air between utterances, not to gate on loudness. A low speech
+            # threshold means a softly-spoken sentence still gets transcribed.
+            vad_parameters={
+                "min_silence_duration_ms": 400,
+                "threshold": 0.25,
+                "speech_pad_ms": 200,
+            },
             # Each live window is transcribed independently; carrying context
             # across them makes Whisper loop on its own previous output.
             condition_on_previous_text=False,
-            initial_prompt=_URDU_PRIMER if target == "ur" else _ENGLISH_PRIMER,
+            # NO initial_prompt. Priming Whisper with a "this is a business
+            # meeting" sentence made it *echo that sentence back* as transcript
+            # whenever the audio was unclear — invented text that looked real.
+            # Language locking (StickyLanguage) steers it instead.
+            initial_prompt=None,
+            # Falls back through higher temperatures only when a decode looks
+            # degenerate, which is what catches repeated/looping output.
+            temperature=[0.0, 0.2, 0.4, 0.6],
+            # A decode that compresses too well is repeating itself; one the
+            # model has little confidence in is usually noise fitted to words.
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.6,
         )
 
         segments: list[TranscriptSegment] = []
         texts: list[str] = []
-        for seg in raw_segments:
+        for seg in raw_segments:  # the generator is consumed — and decoded — here
             text = seg.text.strip()
             if not text or is_hallucination(text):
+                continue
+            # Whisper marks segments it believes are silence; on a live mic
+            # those are room noise fitted to plausible words.
+            if getattr(seg, "no_speech_prob", 0.0) > 0.75:
+                logger.debug("Dropped a likely-silence segment: %r", text)
+                continue
+            # A confident transcription of real speech scores well above this.
+            # Anything this uncertain is the model guessing at noise, and a
+            # plausible invented sentence in the notes is worse than a gap.
+            avg_logprob = getattr(seg, "avg_logprob", 0.0)
+            if avg_logprob < _MIN_AVG_LOGPROB:
+                logger.debug(
+                    "Dropped a low-confidence segment (avg_logprob=%.2f): %r",
+                    avg_logprob, text,
+                )
                 continue
             segments.append(TranscriptSegment(text=text, start=seg.start, end=seg.end))
             texts.append(text)

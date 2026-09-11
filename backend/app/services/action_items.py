@@ -22,6 +22,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import ActionItem, Decision, Meeting, Notification, Summary, User
+from app.services.deadlines import parse_deadline
+from app.services.notifier import notify_task_assigned
 
 logger = logging.getLogger(__name__)
 
@@ -145,28 +147,24 @@ def persist_meeting_notes(
         assignee_user = resolve_assignee(assignee_name, db)
         deadline = raw_item.get("deadline") or None
 
-        db.add(ActionItem(
+        item = ActionItem(
             meeting_id=meeting_id,
             assignee=assignee_name,
             assignee_user_id=assignee_user.id if assignee_user else None,
             assigned_by=normalize_person_name(raw_item.get("assigned_by")),
             task=task,
             deadline=deadline,
-        ))
+            due_at=parse_deadline(deadline),
+            status="pending",
+            priority="medium",
+        )
+        db.add(item)
 
         if assignee_user:
             assigned += 1
             # Don't ping the owner about their own meeting's tasks — they get
             # the summary notification instead.
-            if assignee_user.id != meeting.owner_id:
-                db.add(Notification(
-                    user_id=assignee_user.id,
-                    meeting_id=meeting_id,
-                    type="task_assigned",
-                    title=f"New task from: {meeting.title}",
-                    body=task + (f" · Due {deadline}" if deadline else ""),
-                    read=False,
-                ))
+            notify_task_assigned(db, item, meeting, actor_id=meeting.owner_id)
         else:
             unassigned += 1
 

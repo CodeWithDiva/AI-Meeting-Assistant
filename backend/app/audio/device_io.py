@@ -166,6 +166,19 @@ def resample_pcm16(pcm_data: bytes, src_rate: int, dst_rate: int) -> bytes:
     return converted.astype(np.int16).tobytes()
 
 
+def _rms16(pcm: bytes) -> float:
+    """Quick loudness reading for PCM16 mono, used only for debug logging."""
+    if not pcm:
+        return 0.0
+    import numpy as np
+
+    usable = len(pcm) - (len(pcm) % 2)
+    if usable <= 0:
+        return 0.0
+    samples = np.frombuffer(pcm[:usable], dtype=np.int16).astype(np.float32)
+    return float(np.sqrt(np.mean(samples**2))) if samples.size else 0.0
+
+
 def _to_mono_16k(pcm: bytes, channels: int, src_rate: int, dst_rate: int) -> bytes:
     """Downmix interleaved PCM16 to mono, then resample to the target rate."""
     if channels > 1:
@@ -203,11 +216,19 @@ class MicCaptureStream:
         loopback: bool = False,
         mix_mic: bool = False,
         mic_device: str | None = None,
+        mic_speaker_name: str = "You",
+        other_speaker_name: str = "Participant",
     ) -> None:
         self.device_name = device_name or None
         self.loopback = loopback
         self.mix_mic = mix_mic and loopback
         self.mic_device = mic_device or None
+        # In mixed mode, each yielded chunk is attributed to whichever source
+        # (the user's own mic, or loopback/"everyone else") was louder in it —
+        # good enough to label the transcript without a full second pipeline.
+        self.mic_speaker_name = mic_speaker_name or "You"
+        self.other_speaker_name = other_speaker_name or "Participant"
+        self.last_speaker_label = self.other_speaker_name
         self.device_index: int | None = None
         # What the pipeline receives. `capture_rate` is what the hardware
         # actually runs at, which may differ.
@@ -219,6 +240,13 @@ class MicCaptureStream:
         self._queue: "queue.Queue[bytes]" = queue.Queue()
         self._mic_queue: "queue.Queue[bytes]" = queue.Queue()
         self._running = False
+        # True once the mic side of a mixed (loopback + mic) capture is
+        # actually open. If mix_mic was requested but this stays False, only
+        # the other participants were ever captured — the user's own voice
+        # (and any wake-word they spoke) was not. Surfaced in get_status() so
+        # this is visible in the UI instead of only a backend log line.
+        self.mic_active = False
+        self.mic_error: str | None = None
 
     def start(self) -> None:
         """Open the capture stream on the configured device.
@@ -269,7 +297,9 @@ class MicCaptureStream:
         """Capture the user's own microphone alongside the loopback stream.
 
         Failure here is non-fatal: loopback (the other participants) still
-        works, we just won't have the user's own voice.
+        works, we just won't have the user's own voice. Either way the outcome
+        is recorded on ``mic_active`` / ``mic_error`` rather than only logged,
+        so the API and UI can tell the user their own voice may be missing.
         """
         try:
             index = resolve_device(self.mic_device, want_input=True) if self.mic_device else None
@@ -288,13 +318,16 @@ class MicCaptureStream:
                 callback=_cb,
             )
             self._mic_stream.start()
+            self.mic_active = True
             logger.info(
                 "Also capturing your microphone ('%s') for attach mode.", info["name"]
             )
-        except Exception:
+        except Exception as exc:
+            self.mic_active = False
+            self.mic_error = str(exc)
             logger.warning(
-                "Could not open the microphone for attach mode — only the other "
-                "participants' audio will be transcribed.", exc_info=True,
+                "Could not open the microphone for attach mode (%s) — only the "
+                "other participants' audio will be transcribed, not yours.", exc,
             )
             self._mic_stream = None
 
@@ -445,7 +478,19 @@ class MicCaptureStream:
             yield chunk
 
     def _mix_in_mic(self, loopback_chunk: bytes) -> bytes:
-        """Sum the user's mic audio into a loopback chunk, clamping to int16."""
+        """Sum the user's mic audio into a loopback chunk.
+
+        Hard-clipping a sum (the old behaviour) introduces harsh harmonic
+        distortion whenever both sources are simultaneously loud — exactly
+        when someone is talking over you — which is a direct hit to Whisper's
+        accuracy. This only scales the sum down when it would actually clip,
+        so quiet audio keeps its full loudness and only genuine overlaps get
+        gently attenuated instead of clipped.
+
+        Also updates `last_speaker_label` to whichever source was louder in
+        this chunk, so a speaker_resolver can label the transcript "You" vs.
+        the other participants without a second, fully separate pipeline.
+        """
         import numpy as np
 
         mic = bytearray()
@@ -455,15 +500,76 @@ class MicCaptureStream:
                 mic.extend(self._mic_queue.get_nowait())
             except queue.Empty:
                 break
+
+        lb_rms = _rms16(loopback_chunk)
+        mic_rms = _rms16(bytes(mic)) if mic else 0.0
+
+        self._level_log_counter = getattr(self, "_level_log_counter", 0) + 1
+        if self._level_log_counter % 25 == 0:  # roughly every 5s at 200ms chunks
+            logger.info(
+                "Attach-mode levels — loopback RMS=%.0f, mic RMS=%.0f%s",
+                lb_rms, mic_rms,
+                "" if mic else " (no mic data queued — check BOT_MIC_INPUT_DEVICE / mic_active)",
+            )
+
+        # A clear margin (not just "slightly louder") avoids the label
+        # flip-flopping on near-equal background levels.
+        if mic_rms > max(200.0, lb_rms * 1.3):
+            self.last_speaker_label = self.mic_speaker_name
+        elif lb_rms > max(200.0, mic_rms * 1.3):
+            self.last_speaker_label = self.other_speaker_name
+
         if not mic:
             return loopback_chunk
 
         n = min(want, len(mic))
-        a = np.frombuffer(loopback_chunk[:n], dtype=np.int16).astype(np.int32)
-        b = np.frombuffer(bytes(mic[:n]), dtype=np.int16).astype(np.int32)
-        mixed = np.clip(a + b, -32768, 32767).astype(np.int16)
+        a = np.frombuffer(loopback_chunk[:n], dtype=np.int16).astype(np.float32)
+        b = np.frombuffer(bytes(mic[:n]), dtype=np.int16).astype(np.float32)
+        raw = a + b
+        peak = float(np.max(np.abs(raw))) if raw.size else 0.0
+        if peak > 32760.0:
+            raw = raw * (32760.0 / peak)
+        mixed = raw.astype(np.int16)
         # Keep any loopback tail beyond what the mic covered.
         return mixed.tobytes() + loopback_chunk[n:]
+
+
+def _play_via_wasapi(audio, sample_rate: int, device_name: str | None) -> None:
+    """Play mono int16 audio through a Windows output endpoint using soundcard.
+
+    Blocking. Initialises COM for the calling thread, since this runs in an
+    executor worker. Resamples to 48 kHz, the shared-mode rate virtual cables
+    run at, so no format negotiation is left to the driver.
+    """
+    import numpy as np
+    import soundcard as sc
+
+    try:
+        import comtypes
+
+        comtypes.CoInitialize()
+    except Exception:
+        pass  # already initialised on this thread (possibly in another mode)
+
+    speakers = sc.all_speakers()
+    if device_name:
+        wanted = device_name.strip().casefold()
+        speaker = next((sp for sp in speakers if sp.name.strip().casefold() == wanted), None) or next(
+            (sp for sp in speakers if wanted in sp.name.casefold()), None
+        )
+        if speaker is None:
+            raise DeviceNotFoundError(
+                f"No Windows output endpoint matches {device_name!r}. Available: "
+                + ", ".join(sp.name for sp in speakers)
+            )
+    else:
+        speaker = sc.default_speaker()
+
+    target_rate = 48_000
+    pcm = resample_pcm16(audio.astype(np.int16).tobytes(), sample_rate, target_rate)
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    with speaker.player(samplerate=target_rate, channels=1) as player:
+        player.play(samples)
 
 
 def play_wav_bytes(wav_bytes: bytes, device_name: str | None) -> None:
@@ -485,14 +591,36 @@ def play_wav_bytes(wav_bytes: bytes, device_name: str | None) -> None:
 
     audio = np.frombuffer(raw, dtype=np.int16)
     if n_channels > 1:
-        audio = audio.reshape(-1, n_channels)
+        audio = audio.reshape(-1, n_channels).mean(axis=1).astype(np.int16)
 
-    sd.play(
-        audio,
-        samplerate=sample_rate,
-        device=resolve_device(device_name, want_input=False),
-        blocking=True,
-    )
+    # soundcard (WASAPI) first. PortAudio output into VB-Audio Virtual Cable was
+    # measured delivering nothing to the cable's recording side from every host
+    # API (MME, DirectSound, WASAPI) — the call returned, the reply never
+    # reached the meeting — while soundcard's playback arrived intact.
+    try:
+        _play_via_wasapi(audio, sample_rate, device_name)
+        return
+    except ModuleNotFoundError:
+        pass
+    except Exception:
+        logger.warning(
+            "WASAPI playback into %r failed — falling back to PortAudio.",
+            device_name, exc_info=True,
+        )
+
+    # Prefer an endpoint that accepts the WAV's own rate. Windows' WASAPI
+    # endpoints only run at their native rate and reject anything else with
+    # "Invalid sample rate" — which silently kept every spoken reply out of the
+    # meeting — so when no endpoint takes it, resample to the device's rate.
+    index = resolve_device(device_name, want_input=False, samplerate=sample_rate)
+    if index is not None and not _supports(index, sample_rate, want_input=False):
+        native = int(sd.query_devices(index)["default_samplerate"])
+        audio = np.frombuffer(
+            resample_pcm16(audio.tobytes(), sample_rate, native), dtype=np.int16
+        )
+        sample_rate = native
+
+    sd.play(audio, samplerate=sample_rate, device=index, blocking=True)
 
 
 def list_devices() -> list[dict]:

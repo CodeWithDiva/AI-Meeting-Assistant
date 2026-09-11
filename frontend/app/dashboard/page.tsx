@@ -24,6 +24,7 @@ export default function DashboardPage() {
   const [joinTitle, setJoinTitle] = useState("");
   const [joinRecord, setJoinRecord] = useState(false);
   const [joinMode, setJoinMode] = useState<"agent" | "attach">("agent");
+  const [joinDisplayName, setJoinDisplayName] = useState("");
   const [joining, setJoining] = useState(false);
   const [joinMessage, setJoinMessage] = useState("");
 
@@ -100,6 +101,7 @@ export default function DashboardPage() {
         title: joinTitle.trim() || undefined,
         record: joinRecord,
         mode: joinMode,
+        displayName: joinMode === "attach" ? joinDisplayName.trim() || undefined : undefined,
       });
       setJoinLink("");
       setJoinTitle("");
@@ -265,6 +267,18 @@ export default function DashboardPage() {
             disabled={joining}
             aria-label="Meeting title"
           />
+          {joinMode === "attach" && (
+            <input
+              type="text"
+              className="form-input"
+              style={{ flex: "0 1 160px", minWidth: 140 }}
+              placeholder="Your name"
+              value={joinDisplayName}
+              onChange={(e) => setJoinDisplayName(e.target.value)}
+              disabled={joining}
+              aria-label="Your name"
+            />
+          )}
           <button type="submit" className="btn btn-primary btn-lg" disabled={joining}>
             {joining ? (
               <span style={{ display: "flex", alignItems: "center", gap: 8 }}>

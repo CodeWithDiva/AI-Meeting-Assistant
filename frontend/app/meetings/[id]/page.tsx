@@ -62,6 +62,9 @@ export default function MeetingDetailPage() {
   const [agentSimulated, setAgentSimulated] = useState(false);
   const [agentParticipants, setAgentParticipants] = useState<string[]>([]);
   const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
+  // Attach mode only: whether the user's own mic is actually being captured.
+  // null = not applicable (agent mode, or not connected yet).
+  const [micCaptured, setMicCaptured] = useState<boolean | null>(null);
   const [currentUserRole, setCurrentUserRole] = useState<string>("");
 
   // Ava Voice Reply + Realtime WS
@@ -105,6 +108,7 @@ export default function MeetingDetailPage() {
           setAgentSimulated(status.simulated);
           setAgentParticipants(status.participants || []);
           setActiveSpeaker(status.active_speaker || null);
+          setMicCaptured(status.mic_captured ?? null);
         })
         .catch(() => undefined);
     };
@@ -128,7 +132,9 @@ export default function MeetingDetailPage() {
           if (message.event === "agent_state") {
             setAgentState(payload.state || "idle");
             if (typeof payload.simulated === "boolean") setAgentSimulated(payload.simulated);
+            if (typeof payload.mic_captured === "boolean") setMicCaptured(payload.mic_captured);
             if (payload.error) setError(payload.error);
+            else if (payload.message) setSuccess(payload.message);
           } else if (message.event === "notes_ready") {
             // The bot finished writing the notes; pull the fresh meeting in.
             loadMeetingData();
@@ -167,9 +173,12 @@ export default function MeetingDetailPage() {
       setWsConnected(false);
     }
     return () => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close();
-      }
+      // Always close, even mid-handshake (readyState CONNECTING) — React's dev
+      // double-invoke of effects mounts this twice, and closing only OPEN
+      // sockets left the first, still-connecting socket alive. Two open
+      // sockets both received every broadcast, which is why transcript and
+      // Ava-reply entries were showing up doubled.
+      ws?.close();
     };
   }, [meetingId]);
 
@@ -1367,6 +1376,29 @@ export default function MeetingDetailPage() {
                   style={{ borderColor: "#a7f3d0", borderTopColor: "#047857", width: 18, height: 18 }}
                 />
                 <span>Ava is listening in the meeting. Say &quot;Ava, …&quot; to get a spoken reply.</span>
+              </div>
+            )}
+
+            {/* Attach mode: your own mic did not get captured — only the other
+                participants (whatever plays through your speakers) will show up
+                in the transcript, and your own wake-word won't be heard. */}
+            {agentState === "IN_MEETING" && micCaptured === false && (
+              <div
+                style={{
+                  background: "#fffbeb",
+                  border: "1px solid #fde68a",
+                  borderRadius: "var(--radius-md)",
+                  padding: "13px 16px",
+                  color: "#92400e",
+                  fontWeight: 600,
+                  fontSize: 13,
+                  lineHeight: 1.5,
+                }}
+              >
+                ⚠️ Your microphone is not being captured — only what plays through your
+                speakers (the other participants) will be transcribed, not your own voice.
+                Check <code>BOT_MIC_INPUT_DEVICE</code> in <code>.env</code> against the
+                mic you use in the meeting.
               </div>
             )}
 

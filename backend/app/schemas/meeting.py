@@ -39,10 +39,14 @@ class DecisionBrief(BaseModel):
 
 class ActionItemBrief(BaseModel):
     id: int
+    meeting_id: int
     assignee: str | None
+    assignee_user_id: int | None = None
     assigned_by: str | None
     task: str
     deadline: str | None
+    due_at: datetime | None = None
+    priority: str | None = "medium"
     status: str
 
     model_config = {"from_attributes": True}

@@ -19,6 +19,7 @@ from __future__ import annotations
 import array
 import asyncio
 import logging
+import os
 import wave
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,10 +41,25 @@ BYTES_PER_SAMPLE = 2
 
 # Utterance segmentation. Audio is buffered until the speaker pauses, so a
 # window lines up with a sentence rather than a stopwatch.
-SILENCE_RMS = 320          # below this, a chunk counts as silence
+#
+# The speech/silence threshold adapts to the room instead of being a fixed
+# number: a phone-as-microphone over Wi-Fi, or a voice already squashed by
+# Zoom's codec, can sit far below any constant you pick, and a constant that
+# is too high silently discards whole sentences as "silence" — the words just
+# never reach Whisper. So the noise floor is measured continuously and speech
+# is anything meaningfully above it.
+SILENCE_RMS = 320          # starting guess, immediately adapted (see _speech_floor)
+NOISE_FLOOR_MARGIN = 2.2   # speech must be this much louder than the noise floor
+MIN_SPEECH_RMS = 90        # never treat near-digital-silence as speech
+MAX_SPEECH_RMS = 400       # never demand more than this, however noisy the room
 SILENCE_HANG_MS = 700      # pause that ends an utterance
 MIN_UTTERANCE_MS = 1_200   # ignore coughs/keyboard clicks
 MAX_UTTERANCE_MS = 20_000  # hard cut so one long talker still streams
+
+# How long to keep draining queued utterances once the meeting ends. Whisper
+# on a slow CPU can be several minutes behind a long meeting; the tail of the
+# conversation is usually where the decisions are, so it is worth waiting for.
+FINALIZE_DRAIN_SECONDS = float(os.getenv("BOT_FINALIZE_DRAIN_SECONDS", "600"))
 
 RECORDINGS_DIR = Path(__file__).resolve().parents[2] / "recordings"
 
@@ -58,12 +74,18 @@ class LiveMeetingPipeline:
         meeting_id: int,
         sample_rate: int = SAMPLE_RATE,
         speaker_resolver: SpeakerResolver | None = None,
+        on_text: Callable[[str], "asyncio.Future | None"] | None = None,
     ) -> None:
         self.meeting_id = meeting_id
         self.sample_rate = sample_rate
-        # Called at transcription time to ask the bot "who is talking right
-        # now?" — the browser bot reads this off the meeting UI.
+        # Called when an utterance *ends* to ask "who was talking?" — the
+        # browser bot reads this off the meeting UI. Captured at segmentation
+        # time, not at transcription time, because transcription can finish
+        # long after the words were actually spoken.
         self._speaker_resolver = speaker_resolver
+        # Awaited for each finished line — this is how the wake-word assistant
+        # hears the transcript.
+        self._on_text = on_text
 
         self._service = FasterWhisperService()
         self._language = StickyLanguage()
@@ -72,6 +94,21 @@ class LiveMeetingPipeline:
         self._buffer = bytearray()
         self._silence_ms = 0
         self._offset = 0.0
+        # Rolling estimate of how loud this room is when nobody is talking,
+        # used to decide what counts as speech. See _speech_floor().
+        self._noise_floor: float | None = None
+
+        # Finished utterances waiting to be transcribed. Whisper on a weak CPU
+        # runs several times slower than real time, so transcribing inline
+        # stalled audio ingestion for the whole call and the back half of a
+        # meeting simply never got captured. Queuing decouples the two: audio
+        # is always consumed at real speed, and the transcript catches up —
+        # lagging during the meeting, complete by the end.
+        # Created lazily in _ensure_worker(), inside the loop that will use it:
+        # an asyncio.Queue binds to the loop it first blocks on, so building it
+        # here would tie the pipeline to whichever loop happened to construct it.
+        self._work: asyncio.Queue[tuple[bytes, float, float, str]] | None = None
+        self._worker: asyncio.Task | None = None
 
         self._recorder: wave.Wave_write | None = None
         self._recording_path: Path | None = None
@@ -82,16 +119,26 @@ class LiveMeetingPipeline:
     # ------------------------------------------------------------------
 
     async def add_chunk(self, chunk: bytes) -> list[str]:
-        """Add PCM16 mono audio; return text for any utterance that completed."""
+        """Add PCM16 mono audio. Completed utterances are queued, not awaited.
+
+        Always returns `[]` — finished text is delivered through the `on_text`
+        callback once the background worker has transcribed it. Returning it
+        here would mean blocking the caller (and therefore audio capture) for
+        the length of a Whisper run.
+        """
         if not chunk:
             return []
+
+        self._ensure_worker()
 
         async with self._lock:
             self._write_to_recording(chunk)
             self._buffer.extend(chunk)
 
             chunk_ms = len(chunk) / (self.sample_rate * BYTES_PER_SAMPLE) * 1000
-            if _rms(chunk) < SILENCE_RMS:
+            level = _rms(chunk)
+            floor = self._speech_floor(level)
+            if level < floor:
                 self._silence_ms += chunk_ms
             else:
                 self._silence_ms = 0
@@ -106,33 +153,134 @@ class LiveMeetingPipeline:
             window = bytes(self._buffer)
             self._buffer.clear()
             self._silence_ms = 0
+            duration = buffered_ms / 1000
 
-            if _rms(window) < SILENCE_RMS:
+            if _rms(window) < self._speech_floor():
                 # Pure silence — advance the clock but don't ask Whisper, which
                 # would only hallucinate filler onto the transcript.
-                self._offset += buffered_ms / 1000
+                self._offset += duration
                 return []
 
-            return await self._transcribe(window, buffered_ms / 1000)
+            self._queue_window(window, duration)
+            return []
 
     async def flush(self) -> list[str]:
-        """Transcribe whatever is left in the buffer at the end of a meeting."""
+        """Queue whatever is left in the buffer at the end of a meeting."""
+        self._ensure_worker()
         async with self._lock:
             if not self._buffer:
                 return []
             window = bytes(self._buffer)
             self._buffer.clear()
             duration = len(window) / (self.sample_rate * BYTES_PER_SAMPLE)
-            if _rms(window) < SILENCE_RMS:
+            if _rms(window) < self._speech_floor():
                 self._offset += duration
                 return []
-            return await self._transcribe(window, duration)
+            self._queue_window(window, duration)
+            return []
+
+    def _speech_floor(self, level: float | None = None) -> float:
+        """The loudness above which audio counts as speech, tracked live.
+
+        Feeding a level in also updates the noise-floor estimate, but only
+        downward-biased: quiet chunks pull the floor down quickly, loud ones
+        (i.e. probably speech) barely move it. That way the floor settles on
+        the room's background rather than creeping up to swallow the speaker.
+        """
+        if level is not None:
+            if self._noise_floor is None:
+                self._noise_floor = level
+            elif level < self._noise_floor:
+                self._noise_floor = 0.7 * self._noise_floor + 0.3 * level
+            else:
+                self._noise_floor = 0.995 * self._noise_floor + 0.005 * level
+
+        floor = (self._noise_floor or 0.0) * NOISE_FLOOR_MARGIN
+        return max(MIN_SPEECH_RMS, min(floor, MAX_SPEECH_RMS))
+
+    def _queue_window(self, window: bytes, duration: float) -> None:
+        """Hand a finished utterance to the transcription worker."""
+        # Claim this utterance's slot on the meeting timeline now, so queued
+        # work keeps correct timestamps however far behind it runs.
+        start_at = self._offset
+        self._offset += duration
+        assert self._work is not None  # _ensure_worker() ran first
+        self._work.put_nowait((window, duration, start_at, self._current_speaker()))
+        depth = self._work.qsize()
+        if depth > 3:
+            logger.info(
+                "Meeting %d: %d utterances waiting to transcribe — the transcript "
+                "is running behind the meeting and will catch up.",
+                self.meeting_id, depth,
+            )
+
+    def _ensure_worker(self) -> None:
+        if self._work is None:
+            self._work = asyncio.Queue()
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._worker_loop())
+
+    async def _worker_loop(self) -> None:
+        """Transcribe queued utterances one at a time, forever."""
+        while True:
+            window, duration, start_at, speaker = await self._work.get()
+            try:
+                texts = await self._transcribe(window, duration, start_at, speaker)
+                if self._on_text:
+                    for text in texts:
+                        try:
+                            await self._on_text(text)
+                        except Exception:
+                            logger.exception(
+                                "on_text callback failed for meeting %d", self.meeting_id
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One bad utterance must not stop the queue draining.
+                logger.exception(
+                    "Transcription worker failed on one utterance for meeting %d",
+                    self.meeting_id,
+                )
+            finally:
+                # Exactly once per get(), including on cancellation, or
+                # _drain()'s join() would hang forever.
+                self._work.task_done()
+
+    async def _drain(self, timeout: float) -> None:
+        """Wait for queued utterances to finish, up to `timeout` seconds."""
+        if self._work is None or self._work.empty():
+            return
+        logger.info(
+            "Meeting %d: waiting for %d queued utterance(s) to transcribe...",
+            self.meeting_id, self._work.qsize(),
+        )
+        try:
+            await asyncio.wait_for(self._work.join(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Meeting %d: %d utterance(s) still untranscribed after %.0fs — "
+                "finalizing without them.",
+                self.meeting_id, self._work.qsize(), timeout,
+            )
 
     # ------------------------------------------------------------------
     # Transcribe + persist
     # ------------------------------------------------------------------
 
-    async def _transcribe(self, pcm_data: bytes, duration: float) -> list[str]:
+    async def _transcribe(
+        self,
+        pcm_data: bytes,
+        duration: float,
+        start_at: float,
+        speaker: str,
+    ) -> list[str]:
+        """Transcribe one queued utterance and persist it.
+
+        `start_at` and `speaker` are captured when the utterance *ended*, not
+        now — this can run well after the words were spoken, so deriving
+        either here would misattribute both the timestamp and the talker.
+        """
         with NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
             path = Path(temp_file.name)
         try:
@@ -148,16 +296,21 @@ class LiveMeetingPipeline:
             logger.exception("Live transcription failed for meeting %d", self.meeting_id)
             return []
         finally:
-            path.unlink(missing_ok=True)
+            # On Windows, Defender/AV briefly locks a just-written file for
+            # scanning, so unlink() can throw PermissionError right after a
+            # perfectly good transcription. That used to propagate out of this
+            # `finally` and kill the whole live-audio loop — one lock hiccup
+            # silenced transcription for the rest of the meeting. Retry
+            # briefly, then just leave the temp file for the OS to reap rather
+            # than lose a working transcript over a cleanup failure.
+            await _safe_unlink(path)
 
         self._language.observe(result.language, result.language_probability)
 
         texts = [segment.text.strip() for segment in result.segments if segment.text.strip()]
         if not texts:
-            self._offset += duration
             return []
 
-        speaker = self._current_speaker()
         with SessionLocal() as db:
             meeting = db.scalar(select(Meeting).where(Meeting.id == self.meeting_id))
             if not meeting:
@@ -169,8 +322,8 @@ class LiveMeetingPipeline:
                 db.add(TranscriptSegment(
                     meeting_id=self.meeting_id,
                     text=text,
-                    start_time=self._offset + segment.start,
-                    end_time=self._offset + segment.end,
+                    start_time=start_at + segment.start,
+                    end_time=start_at + segment.end,
                     speaker_label=speaker,
                     source="live_bot",
                 ))
@@ -178,7 +331,6 @@ class LiveMeetingPipeline:
             db.commit()
 
         await self._broadcast(texts, speaker, result.language)
-        self._offset += duration
         return texts
 
     def _current_speaker(self) -> str:
@@ -274,9 +426,24 @@ class LiveMeetingPipeline:
     # ------------------------------------------------------------------
 
     async def finalize(self) -> dict:
-        """Flush audio, then generate and persist the meeting's notes."""
+        """Flush audio, drain the transcription backlog, then write the notes.
+
+        On a CPU where Whisper runs slower than real time the queue is still
+        several utterances deep when the meeting ends. Those are the tail of
+        the conversation — usually where the decisions and tasks are — so the
+        backlog is drained before analysis rather than thrown away.
+        """
         await self.flush()
         self._close_recording()
+        await self._drain(timeout=FINALIZE_DRAIN_SECONDS)
+
+        if self._worker and not self._worker.done():
+            self._worker.cancel()
+            try:
+                await self._worker
+            except asyncio.CancelledError:
+                pass
+        self._worker = None
 
         with SessionLocal() as db:
             meeting = db.scalar(select(Meeting).where(Meeting.id == self.meeting_id))
@@ -308,6 +475,28 @@ class LiveMeetingPipeline:
         except Exception:
             logger.debug("Failed to broadcast notes_ready", exc_info=True)
         return report
+
+
+async def _safe_unlink(path: Path, attempts: int = 5, delay: float = 0.1) -> None:
+    """Delete a temp file, tolerating Windows' transient AV-scan file lock.
+
+    A brand-new file can be briefly held open by Defender's real-time scan;
+    deleting it right away can raise `PermissionError` (WinError 32) even
+    though nothing in this process still has it open. Retries a few times
+    with a short backoff, and gives up quietly — a leftover few-KB temp WAV
+    is a non-issue next to crashing the live transcription loop over it.
+    """
+    for attempt in range(attempts):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                logger.debug("Could not delete temp file %s (still locked) — leaving it.", path)
+                return
+            await asyncio.sleep(delay)
+        except OSError:
+            return
 
 
 def _rms(pcm_data: bytes) -> float:

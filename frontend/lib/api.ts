@@ -121,6 +121,8 @@ export interface AgentStatus {
   active_speaker?: string | null;
   participants: string[];
   error?: string | null;
+  /** Attach mode only: whether your own mic is being captured (null elsewhere). */
+  mic_captured?: boolean | null;
 }
 
 export interface AgentJoinResult {
@@ -506,7 +508,13 @@ export const api = {
   //                 listens through the capture device (link optional, title used).
   async sendAgentToMeeting(
     link: string,
-    options: { title?: string; record?: boolean; mode?: "agent" | "attach" } = {}
+    options: {
+      title?: string;
+      record?: boolean;
+      mode?: "agent" | "attach";
+      /** mode="attach" only: your name, used to label your own voice in the transcript. */
+      displayName?: string;
+    } = {}
   ): Promise<AgentJoinResult> {
     return apiRequest<AgentJoinResult>("/api/agent/join", {
       method: "POST",
@@ -515,6 +523,7 @@ export const api = {
         link: link || undefined,
         title: options.title,
         record: options.record ?? false,
+        display_name: options.displayName || undefined,
       }),
     });
   },

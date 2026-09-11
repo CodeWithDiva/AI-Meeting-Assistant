@@ -34,7 +34,9 @@ from app.routers.transcript import router as transcript_router
 from app.routers.transcription import router as transcription_router
 from app.routers.tts import router as tts_router
 from app.routers.voice_reply import router as voice_reply_router
+from app.routers.workspace import router as workspace_router
 from app.database import Base, engine
+from app.services.notifier import deadline_reminder_loop, email_enabled
 import app.models  # noqa: F401
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
@@ -47,7 +49,19 @@ async def lifespan(_: FastAPI):
     # Record the server's event loop so broadcasts fired from the meeting-bot
     # loop thread can be marshalled back onto it.
     ws_manager.bind_loop(asyncio.get_running_loop())
+
+    # Deadline reminders and overdue alerts. 0 disables the sweep.
+    sweep_seconds = float(os.getenv("TASK_REMINDER_SWEEP_SECONDS", "300"))
+    reminders = (
+        asyncio.create_task(deadline_reminder_loop(sweep_seconds)) if sweep_seconds > 0 else None
+    )
     yield
+    if reminders:
+        reminders.cancel()
+        try:
+            await reminders
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
@@ -88,6 +102,7 @@ app.include_router(notifications_router)
 app.include_router(tasks_router)
 app.include_router(analysis_router)
 app.include_router(agent_router)
+app.include_router(workspace_router)
 
 
 @app.exception_handler(Exception)
@@ -99,15 +114,49 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 Base.metadata.create_all(bind=engine)
 
 # Keep local MVP databases compatible when a new persisted field is introduced.
+_ADDED_COLUMNS = {
+    "users": {"role": "VARCHAR(20) DEFAULT 'employee'"},
+    "action_items": {
+        "priority": "VARCHAR(10) DEFAULT 'medium'",
+        "due_at": "DATETIME",
+        "reminder_sent_at": "DATETIME",
+        "overdue_notified_at": "DATETIME",
+        "completed_at": "DATETIME",
+    },
+}
+
 if engine.dialect.name == "sqlite":
     from sqlalchemy import inspect, text
 
-    user_columns = {column["name"] for column in inspect(engine).get_columns("users")}
-    if "role" not in user_columns:
+    _added_due_at = False
+    for _table, _columns in _ADDED_COLUMNS.items():
+        _existing = {column["name"] for column in inspect(engine).get_columns(_table)}
         with engine.begin() as connection:
-            connection.execute(
-                text("ALTER TABLE users ADD COLUMN role VARCHAR(20) DEFAULT 'employee'")
-            )
+            for _name, _ddl in _columns.items():
+                if _name not in _existing:
+                    connection.execute(text(f"ALTER TABLE {_table} ADD COLUMN {_name} {_ddl}"))
+                    _added_due_at = _added_due_at or (_table, _name) == ("action_items", "due_at")
+
+    if _added_due_at:
+        # Resolve deadlines already on existing tasks, relative to when each
+        # task was created ("Friday" said last month is not this Friday). Tasks
+        # already past due are marked as alerted so the first reminder sweep
+        # does not flood everyone with old overdue notices.
+        from datetime import datetime, timezone
+
+        from app.database import SessionLocal
+        from app.models import ActionItem
+        from app.services.deadlines import parse_deadline
+
+        with SessionLocal() as _db:
+            _now = datetime.now(timezone.utc).replace(tzinfo=None)
+            for _item in _db.query(ActionItem).filter(ActionItem.deadline.is_not(None)):
+                _spoken_at = (_item.created_at or _now).replace(tzinfo=timezone.utc).astimezone()
+                _item.due_at = parse_deadline(_item.deadline, now=_spoken_at)
+                if _item.due_at and _item.due_at < _now:
+                    _item.overdue_notified_at = _now
+                    _item.reminder_sent_at = _now
+            _db.commit()
 
 
 @app.get("/health", tags=["system"])
@@ -135,7 +184,13 @@ async def capabilities() -> dict[str, object]:
 
         return importlib.util.find_spec(module) is not None
 
+    from app.services.voice_assistant import WAKE_WORD
+
     return {
+        "assistant_name": os.getenv("BOT_DISPLAY_NAME", "Alina"),
+        "wake_word": WAKE_WORD,
+        "email_notifications": email_enabled(),
+        "virtual_microphone": bool(os.getenv("BOT_VIRTUAL_MIC_LABEL")),
         "platforms": ["zoom", "google_meet"],
         "browser_automation": _installed("playwright"),
         "audio_devices": _installed("sounddevice"),

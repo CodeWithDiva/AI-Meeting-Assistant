@@ -117,7 +117,14 @@ async def join_meeting(
     _join_errors.pop(meeting.id, None)
 
     if request.mode == "attach":
-        session = CaptureSession(meeting_id=meeting.id, user_id=user.id)
+        display_name = (
+            (request.display_name or "").strip()
+            or user.full_name
+            or user.email.split("@")[0]
+        )
+        session = CaptureSession(
+            meeting_id=meeting.id, user_id=user.id, display_name=display_name
+        )
         _active_bots[meeting.id] = session
         asyncio.create_task(_start_capture_in_background(session))
         return AgentJoinResponse(
@@ -148,7 +155,11 @@ async def _start_capture_in_background(session: CaptureSession) -> None:
     await _broadcast(meeting_id, "JOINING")
     try:
         result = await session.start()
-        await _broadcast(meeting_id, "IN_MEETING", {"simulated": result.get("simulated", False)})
+        await _broadcast(meeting_id, "IN_MEETING", {
+            "simulated": result.get("simulated", False),
+            "mic_captured": result.get("mic_captured"),
+            "message": result.get("message"),
+        })
         logger.info("Attach-mode capture started for meeting %d.", meeting_id)
     except Exception as exc:
         message = str(exc)
@@ -290,6 +301,7 @@ def agent_status(
         active_speaker=status.get("active_speaker"),
         participants=status.get("participants") or [],
         error=_join_errors.get(meeting_id),
+        mic_captured=status.get("mic_captured"),
     )
 
 
