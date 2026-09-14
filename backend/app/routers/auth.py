@@ -1,5 +1,6 @@
 import os
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -11,8 +12,11 @@ from app.auth import create_access_token, get_current_user, hash_password, verif
 from app.database import get_db
 from app.models import ActionItem, Meeting, User
 from app.schemas.auth import (
-    AdminUserCreate,
+    AcceptInviteRequest,
+    AdminUserInvite,
+    AdminUserInviteResponse,
     AdminUserUpdate,
+    InviteDetails,
     LoginRequest,
     ProfileUpdate,
     RegisterRequest,
@@ -20,13 +24,25 @@ from app.schemas.auth import (
     TokenResponse,
     UserResponse,
 )
+from app.services.notifier import email_enabled, send_invite_email
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+_INVITE_LIFETIME = timedelta(days=7)
 
 
 def _require_admin(user: User) -> None:
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required.")
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _invite_link(token: str) -> str:
+    base = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    return f"{base}/accept-invite?token={token}"
 
 
 @router.post("/register", response_model=UserResponse, status_code=201)
@@ -57,6 +73,11 @@ def login(request: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
     user = db.scalar(select(User).where(User.email == request.email.lower()))
     if not user or not verify_password(request.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password.")
+    if user.invite_token is not None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="This account hasn't been set up yet — use the invite link that was sent to set a password.",
+        )
     try:
         token = create_access_token(user.id, user.role)
     except RuntimeError as error:
@@ -100,8 +121,47 @@ def list_team_members(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[User]:
-    """Everyone a task can be assigned to."""
+    """Everyone a task can be assigned to (invited-but-not-yet-active people included)."""
     return list(db.scalars(select(User).order_by(func.lower(func.coalesce(User.full_name, User.email)))))
+
+
+# ---------------------------------------------------------------------------
+# Invites — accepted by the invited person, no auth required
+# ---------------------------------------------------------------------------
+
+
+@router.get("/invite/{token}", response_model=InviteDetails)
+def get_invite(token: str, db: Session = Depends(get_db)) -> InviteDetails:
+    """What the accept-invite page shows before asking for a password."""
+    user = db.scalar(select(User).where(User.invite_token == token))
+    if not user or not user.invite_expires_at or user.invite_expires_at < _now():
+        raise HTTPException(status_code=404, detail="This invite link is invalid or has expired.")
+    return InviteDetails(email=user.email, full_name=user.full_name)
+
+
+@router.post("/accept-invite", response_model=TokenResponse)
+def accept_invite(request: AcceptInviteRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    """Set a password for an admin-invited account and sign them straight in."""
+    user = db.scalar(select(User).where(User.invite_token == request.token))
+    if not user or not user.invite_expires_at or user.invite_expires_at < _now():
+        raise HTTPException(status_code=404, detail="This invite link is invalid or has expired.")
+
+    user.password_hash = hash_password(request.password)
+    user.invite_token = None
+    user.invite_expires_at = None
+    db.commit()
+    db.refresh(user)
+
+    try:
+        access_token = create_access_token(user.id, user.role)
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return TokenResponse(access_token=access_token, user=UserResponse.model_validate(user, from_attributes=True))
+
+
+# ---------------------------------------------------------------------------
+# Admin
+# ---------------------------------------------------------------------------
 
 
 @router.get("/admin/users", tags=["admin"])
@@ -111,7 +171,7 @@ def list_all_users(
 ) -> list[dict[str, Any]]:
     """Admin-only: return all registered users with activity stats."""
     _require_admin(user)
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = _now()
 
     users = list(db.scalars(select(User).order_by(User.created_at.desc())))
     result = []
@@ -126,6 +186,7 @@ def list_all_users(
             "email": u.email,
             "full_name": u.full_name,
             "role": u.role,
+            "status": "invited" if u.invite_token else "active",
             "created_at": u.created_at.isoformat() if u.created_at else None,
             "meeting_count": meeting_count,
             "task_count": len(tasks),
@@ -136,27 +197,75 @@ def list_all_users(
     return result
 
 
-@router.post("/admin/users", response_model=UserResponse, status_code=201, tags=["admin"])
-def admin_create_user(
-    request: AdminUserCreate,
+@router.post("/admin/users", response_model=AdminUserInviteResponse, status_code=201, tags=["admin"])
+def admin_invite_user(
+    request: AdminUserInvite,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> User:
-    """Admin-only: add a team member with a starting password."""
+) -> AdminUserInviteResponse:
+    """Admin-only: add a team member by name and email — no password to hand out.
+
+    They get a link that lets them set their own password. It's emailed when
+    SMTP is configured; either way it's returned here so the admin can send
+    it themselves (chat, WhatsApp, in person).
+    """
     _require_admin(user)
     email = request.email.lower()
     if db.scalar(select(User).where(User.email == email)):
         raise HTTPException(status_code=409, detail="Email is already registered.")
+
+    invite_token = secrets.token_urlsafe(32)
     member = User(
         email=email,
         full_name=request.full_name.strip(),
-        password_hash=hash_password(request.password),
+        # Unusable placeholder — no plaintext password can ever hash to this,
+        # so the account cannot be logged into until the invite is accepted.
+        password_hash=hash_password(secrets.token_urlsafe(32)),
         role=request.role,
+        invite_token=invite_token,
+        invite_expires_at=_now() + _INVITE_LIFETIME,
     )
     db.add(member)
+    db.flush()
+
+    link = _invite_link(invite_token)
+    send_invite_email(db, to=member.email, full_name=member.full_name or "", invite_link=link)
     db.commit()
     db.refresh(member)
-    return member
+
+    return AdminUserInviteResponse(
+        user=UserResponse.model_validate(member, from_attributes=True),
+        invite_link=link,
+        email_sent=email_enabled(),
+    )
+
+
+@router.post("/admin/users/{user_id}/resend-invite", response_model=AdminUserInviteResponse, tags=["admin"])
+def admin_resend_invite(
+    user_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AdminUserInviteResponse:
+    """Admin-only: issue a fresh link for someone who never finished setup."""
+    _require_admin(user)
+    member = db.get(User, user_id)
+    if member is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if member.invite_token is None:
+        raise HTTPException(status_code=400, detail="This person has already set up their account.")
+
+    member.invite_token = secrets.token_urlsafe(32)
+    member.invite_expires_at = _now() + _INVITE_LIFETIME
+    link = _invite_link(member.invite_token)
+    send_invite_email(db, to=member.email, full_name=member.full_name or "", invite_link=link)
+    db.commit()
+    db.refresh(member)
+
+    return AdminUserInviteResponse(
+        user=UserResponse.model_validate(member, from_attributes=True),
+        invite_link=link,
+        email_sent=email_enabled(),
+    )
 
 
 @router.patch("/admin/users/{user_id}", response_model=UserResponse, tags=["admin"])
@@ -180,3 +289,20 @@ def admin_update_user(
     db.commit()
     db.refresh(member)
     return member
+
+
+@router.delete("/admin/users/{user_id}", status_code=204, tags=["admin"])
+def admin_delete_user(
+    user_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    """Admin-only: remove someone who never accepted their invite (or has left)."""
+    _require_admin(user)
+    if user_id == user.id:
+        raise HTTPException(status_code=400, detail="You can't remove your own account.")
+    member = db.get(User, user_id)
+    if member is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    db.delete(member)
+    db.commit()

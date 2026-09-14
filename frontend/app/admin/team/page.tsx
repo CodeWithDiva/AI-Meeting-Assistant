@@ -4,26 +4,33 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { AdminUser, api, authStorage } from "@/lib/api";
+import { formatDate, initials } from "@/lib/format";
+import Icon from "@/app/components/Icon";
+import InviteEmployeeModal from "@/app/components/InviteEmployeeModal";
 
 export default function AdminTeamPage() {
   const router = useRouter();
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
   const [search, setSearch] = useState("");
+  const [showModal, setShowModal] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!authStorage.isLoggedIn()) { router.push("/login"); return; }
     api.getMe().then((me) => {
       if (me.role !== "admin") { router.push("/dashboard"); return; }
+      setCurrentUserId(me.id);
       loadUsers();
     }).catch(() => router.push("/login"));
   }, [router]);
 
   async function loadUsers() {
     try {
-      const data = await api.getAdminUsers();
-      setUsers(data);
+      setUsers(await api.getAdminUsers());
     } catch (e: any) {
       setError(e.message || "Failed to load users");
     } finally {
@@ -31,130 +38,172 @@ export default function AdminTeamPage() {
     }
   }
 
-  const filtered = users.filter(
-    (u) =>
-      u.email.toLowerCase().includes(search.toLowerCase()) ||
-      (u.full_name || "").toLowerCase().includes(search.toLowerCase())
-  );
-
-  const admins = filtered.filter((u) => u.role === "admin");
-  const employees = filtered.filter((u) => u.role !== "admin");
-
-  function formatDate(d: string | null | undefined) {
-    if (!d) return "—";
-    return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  async function toggleRole(user: AdminUser) {
+    const nextRole = user.role === "admin" ? "employee" : "admin";
+    try {
+      await api.adminUpdateUser(user.id, { role: nextRole });
+      await loadUsers();
+    } catch (e: any) {
+      setError(e.message || "Could not change that person's role.");
+    }
   }
 
+  async function resendInvite(user: AdminUser) {
+    setBusyId(user.id);
+    setError("");
+    try {
+      const result = await api.adminResendInvite(user.id);
+      if (result.email_sent) {
+        setSuccess(`Invite re-sent to ${user.email}.`);
+      } else {
+        await navigator.clipboard.writeText(result.invite_link).catch(() => undefined);
+        setSuccess(`Email isn't configured — the new setup link was copied to your clipboard for ${user.email}.`);
+      }
+    } catch (e: any) {
+      setError(e.message || "Could not resend that invite.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function removeUser(user: AdminUser) {
+    if (!confirm(`Remove ${user.full_name || user.email} from the workspace?`)) return;
+    setBusyId(user.id);
+    try {
+      await api.adminDeleteUser(user.id);
+      await loadUsers();
+    } catch (e: any) {
+      setError(e.message || "Could not remove that person.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const filtered = users.filter((u) => u.email.toLowerCase().includes(search.toLowerCase()) || (u.full_name || "").toLowerCase().includes(search.toLowerCase()));
+  const admins = filtered.filter((u) => u.role === "admin");
+  const employees = filtered.filter((u) => u.role !== "admin");
+  const pending = filtered.filter((u) => u.status === "invited");
+
   if (loading) {
-    return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg-primary)" }}>
-        <div className="spinner" />
-      </div>
-    );
+    return <div style={{ minHeight: "60vh", display: "flex", alignItems: "center", justifyContent: "center" }}><div className="spinner" style={{ width: 22, height: 22, borderTopColor: "var(--accent-primary)", borderColor: "var(--border-card)" }} /></div>;
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: "var(--bg-primary)", color: "var(--text-primary)" }}>
-      {/* Header */}
-      <header style={{ background: "var(--bg-glass)", borderBottom: "1px solid var(--border-subtle)", padding: "1rem 2rem", display: "flex", alignItems: "center", gap: "1rem", backdropFilter: "blur(12px)", position: "sticky", top: 0, zIndex: 50 }}>
-        <Link href="/dashboard" style={{ color: "var(--text-muted)", textDecoration: "none", fontSize: "0.875rem" }}>← Dashboard</Link>
-        <h1 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 700, background: "linear-gradient(135deg, #a855f7, #ec4899)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
-          Team
-        </h1>
-        <span style={{ marginLeft: "auto", color: "var(--text-muted)", fontSize: "0.875rem" }}>{users.length} members</span>
-      </header>
-
-      <div style={{ maxWidth: "1000px", margin: "0 auto", padding: "2rem" }}>
-        {error && (
-          <div style={{ marginBottom: "1rem", padding: "0.75rem 1rem", background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.4)", borderRadius: "0.5rem", color: "#f87171", fontSize: "0.875rem" }}>
-            {error}
-          </div>
-        )}
-
-        {/* Stats */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1rem", marginBottom: "2rem" }}>
-          {[
-            { label: "Total Members", value: users.length, icon: "👥", color: "var(--accent-cyan)" },
-            { label: "Admins", value: admins.length, icon: "🔑", color: "#a855f7" },
-            { label: "Employees", value: employees.length, icon: "👤", color: "var(--accent-emerald)" },
-          ].map((stat) => (
-            <div key={stat.label} style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)", borderRadius: "1rem", padding: "1.25rem", textAlign: "center" }}>
-              <div style={{ fontSize: "1.75rem", marginBottom: "0.25rem" }}>{stat.icon}</div>
-              <div style={{ fontSize: "2rem", fontWeight: 700, color: stat.color }}>{stat.value}</div>
-              <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{stat.label}</div>
-            </div>
-          ))}
+    <div className="app-container">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 14, marginBottom: 22 }}>
+        <div>
+          <h1 style={{ fontSize: 22, marginBottom: 4 }}>Team</h1>
+          <p style={{ color: "var(--text-secondary)", fontSize: 13.5 }}>{users.length} member{users.length === 1 ? "" : "s"}</p>
         </div>
-
-        {/* Search */}
-        <div style={{ marginBottom: "1.5rem" }}>
-          <input
-            type="text"
-            placeholder="Search by email or name..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            style={{ width: "100%", padding: "0.75rem 1rem", background: "var(--bg-card)", border: "1px solid var(--border-subtle)", borderRadius: "0.75rem", color: "var(--text-primary)", fontSize: "0.9rem", outline: "none", boxSizing: "border-box" }}
-          />
+        <div style={{ display: "flex", gap: 8 }}>
+          <Link href="/admin/analytics" className="btn btn-secondary"><Icon name="chart" size={15} /> Analytics</Link>
+          <button onClick={() => setShowModal(true)} className="btn btn-primary"><Icon name="plus" size={15} /> Add member</button>
         </div>
+      </div>
 
-        {/* User table */}
-        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)", borderRadius: "1rem", overflow: "hidden" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+      {error && <div className="alert-box alert-error"><Icon name="alert" size={16} />{error}</div>}
+      {success && <div className="alert-box alert-success"><Icon name="check" size={16} />{success}</div>}
+
+      <div className="stats-grid" style={{ marginBottom: 22 }}>
+        <div className="stat-card">
+          <div className="stat-header"><span className="stat-label">Total members</span><Icon name="users" size={14} className="stat-icon" /></div>
+          <span className="stat-value">{users.length}</span>
+        </div>
+        <div className="stat-card">
+          <div className="stat-header"><span className="stat-label">Admins</span><Icon name="shield" size={14} className="stat-icon" /></div>
+          <span className="stat-value">{admins.length}</span>
+        </div>
+        <div className="stat-card">
+          <div className="stat-header"><span className="stat-label">Employees</span><Icon name="user" size={14} className="stat-icon" /></div>
+          <span className="stat-value">{employees.length}</span>
+        </div>
+        <div className="stat-card">
+          <div className="stat-header"><span className="stat-label">Pending invites</span><Icon name="mail" size={14} className="stat-icon" /></div>
+          <span className="stat-value">{pending.length}</span>
+        </div>
+      </div>
+
+      <div style={{ position: "relative", marginBottom: 16 }}>
+        <input type="text" className="form-input" style={{ paddingLeft: 34 }} placeholder="Search by name or email…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "var(--text-dim)" }}><Icon name="search" size={14} /></span>
+      </div>
+
+      <div className="glass-panel" style={{ padding: 0, overflow: "hidden" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table className="data-table">
             <thead>
-              <tr style={{ background: "var(--bg-glass)", borderBottom: "1px solid var(--border-subtle)" }}>
-                {["Member", "Role", "Meetings", "Tasks", "Joined"].map((h) => (
-                  <th key={h} style={{ padding: "0.875rem 1rem", textAlign: "left", fontSize: "0.8rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{h}</th>
-                ))}
+              <tr>
+                <th>Member</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Meetings</th>
+                <th>Open tasks</th>
+                <th>Overdue</th>
+                <th>Joined</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
-              {filtered.map((user, i) => (
-                <tr
-                  key={user.id}
-                  style={{ borderBottom: i < filtered.length - 1 ? "1px solid var(--border-subtle)" : "none", transition: "background 0.15s" }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.03)")}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                >
-                  <td style={{ padding: "1rem", display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                    <div style={{
-                      width: 36, height: 36, borderRadius: "50%",
-                      background: user.role === "admin" ? "linear-gradient(135deg, #a855f7, #ec4899)" : "linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald))",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      fontSize: "0.875rem", fontWeight: 700, color: "#fff", flexShrink: 0,
-                    }}>
-                      {(user.full_name || user.email).charAt(0).toUpperCase()}
-                    </div>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>{user.full_name || "—"}</div>
-                      <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>{user.email}</div>
+              {filtered.map((user) => (
+                <tr key={user.id} style={{ opacity: busyId === user.id ? 0.5 : 1 }}>
+                  <td>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <span className="avatar" style={{ width: 32, height: 32, fontSize: 12 }}>{initials(user.full_name || user.email)}</span>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 13.5 }}>{user.full_name || "—"}</div>
+                        <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{user.email}</div>
+                      </div>
                     </div>
                   </td>
-                  <td style={{ padding: "1rem" }}>
-                    <span style={{
-                      padding: "0.25rem 0.65rem", borderRadius: "9999px", fontSize: "0.75rem", fontWeight: 600,
-                      background: user.role === "admin" ? "rgba(168,85,247,0.15)" : "rgba(34,211,238,0.1)",
-                      color: user.role === "admin" ? "#c084fc" : "var(--accent-cyan)",
-                      border: `1px solid ${user.role === "admin" ? "rgba(168,85,247,0.3)" : "rgba(34,211,238,0.2)"}`,
-                    }}>
-                      {user.role === "admin" ? "🔑 Admin" : "👤 Employee"}
+                  <td>
+                    <span className={`badge ${user.role === "admin" ? "badge-purple" : "badge-cyan"}`}>
+                      <Icon name={user.role === "admin" ? "shield" : "user"} size={10} /> {user.role === "admin" ? "Admin" : "Employee"}
                     </span>
                   </td>
-                  <td style={{ padding: "1rem", color: "var(--accent-cyan)", fontWeight: 600 }}>{user.meeting_count}</td>
-                  <td style={{ padding: "1rem", color: "var(--accent-emerald)", fontWeight: 600 }}>{user.task_count}</td>
-                  <td style={{ padding: "1rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>{formatDate(user.created_at)}</td>
+                  <td>
+                    {user.status === "invited"
+                      ? <span className="badge badge-amber"><Icon name="clock" size={10} /> Invited</span>
+                      : <span className="badge badge-emerald"><Icon name="check" size={10} /> Active</span>}
+                  </td>
+                  <td>{user.meeting_count}</td>
+                  <td>{user.open_tasks}</td>
+                  <td style={{ color: user.overdue_tasks > 0 ? "var(--accent-rose)" : undefined, fontWeight: user.overdue_tasks > 0 ? 700 : 400 }}>{user.overdue_tasks}</td>
+                  <td style={{ color: "var(--text-muted)" }}>{formatDate(user.created_at, true)}</td>
+                  <td>
+                    <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                      {user.status === "invited" && (
+                        <button onClick={() => resendInvite(user)} disabled={busyId === user.id} className="btn btn-ghost btn-sm" title="Resend invite">
+                          <Icon name="mail" size={12} />
+                        </button>
+                      )}
+                      {user.id !== currentUserId && (
+                        <button onClick={() => toggleRole(user)} disabled={busyId === user.id} className="btn btn-ghost btn-sm">
+                          {user.role === "admin" ? "Make employee" : "Make admin"}
+                        </button>
+                      )}
+                      {user.id !== currentUserId && (
+                        <button onClick={() => removeUser(user)} disabled={busyId === user.id} className="icon-btn" style={{ width: 28, height: 28, color: "var(--accent-rose)" }} title="Remove">
+                          <Icon name="trash" size={12} />
+                        </button>
+                      )}
+                    </div>
+                  </td>
                 </tr>
               ))}
               {filtered.length === 0 && (
-                <tr>
-                  <td colSpan={5} style={{ padding: "3rem", textAlign: "center", color: "var(--text-muted)" }}>
-                    No team members found
-                  </td>
-                </tr>
+                <tr><td colSpan={8} style={{ textAlign: "center", padding: "40px 0", color: "var(--text-muted)" }}>No team members found.</td></tr>
               )}
             </tbody>
           </table>
         </div>
       </div>
+
+      {showModal && (
+        <InviteEmployeeModal
+          onClose={() => setShowModal(false)}
+          onInvited={() => { setSuccess("Invite sent."); loadUsers(); }}
+        />
+      )}
     </div>
   );
 }

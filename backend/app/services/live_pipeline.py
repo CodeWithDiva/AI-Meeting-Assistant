@@ -330,6 +330,13 @@ class LiveMeetingPipeline:
             meeting.transcript = _append_transcript(meeting.transcript, speaker, texts)
             db.commit()
 
+        # The single most useful line for diagnosing "the assistant never
+        # replies in the meeting": without it there is no way to tell whether
+        # Whisper ever actually heard the wake word, or the audio pipeline
+        # never received speech at all.
+        for text in texts:
+            logger.info("Meeting %d transcript [%s]: %s", self.meeting_id, speaker, text)
+
         await self._broadcast(texts, speaker, result.language)
         return texts
 

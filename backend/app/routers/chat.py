@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from typing import Any
 
 import httpx
@@ -39,36 +40,87 @@ def _owned_meeting(meeting_id: int, user: User, db: Session) -> Meeting:
     return meeting
 
 
-async def _ask_llm(context_prompt: str, question: str) -> str:
-    """Ask Ollama with grounded context, falling back to a context-derived answer."""
+async def _ask_llm(context_prompt: str, question: str, *, style: str = "spoken") -> str:
+    """Ask Ollama with grounded context, falling back to a context-derived answer.
+
+    `style` controls how much room the answer gets:
+    * "spoken"  — a live wake-word reply that gets synthesized and played into
+      a meeting. Must stay to a sentence or two, both because a long spoken
+      answer is unusable in a meeting and because generation time is what the
+      room waits through.
+    * "written" — read on screen (the meeting Q&A tab, the workspace-wide ask
+      panel), never spoken. Free to be a short list when the question asks
+      for one ("what's still open", "all pending tasks") instead of being
+      squeezed into three sentences that can only name one thing.
+    """
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
     model = os.getenv("OLLAMA_MODEL", "llama3.2")
+    multi_meeting = context_prompt.count("\nMeeting: ") + context_prompt.startswith("Meeting: ") > 1
+
+    if style == "written":
+        length_rule = (
+            "Answer fully — if the question asks for a list (open tasks, "
+            "decisions, what's new), give every matching item as its own "
+            "line starting with '- ', not just the first one you find. "
+            "Otherwise a few sentences is fine. Don't pad the answer with "
+            "filler once it's complete."
+        )
+    else:
+        length_rule = (
+            "Answer in one to three short sentences — this will be spoken "
+            "aloud in the meeting, so favour the single most relevant fact "
+            "over an exhaustive list."
+        )
+
+    scope_rule = (
+        "The context below covers several different meetings, each starting "
+        "with 'Meeting: <title>'. Treat them as separate meetings — pull "
+        "together everything relevant across ALL of them, and when you name "
+        "an item from a specific meeting, say which one if more than one "
+        "meeting has something relevant. Never merge facts from different "
+        "meetings into one item.\n"
+        if multi_meeting else ""
+    )
 
     system_msg = (
-        "You are Alina, an AI meeting assistant. Answer the question accurately "
-        "and briefly — one to three short sentences, since the answer may be "
-        "spoken aloud in the meeting — using ONLY the meeting context below. "
+        "You are Alina, an AI meeting assistant. Answer the question "
+        f"accurately, using ONLY the context below. {length_rule}\n"
+        f"{scope_rule}"
         "Reply in the same language the question was asked in (English, Urdu, "
         "or Roman Urdu). When asked who has a task, the owner is the person "
         "the transcript names as doing it — '[Sara]: Ali will send the report' "
         "means Ali's task, not Sara's. Do not start with your own name. If the "
-        "context does not contain the answer, say it was not discussed in the "
-        "meeting."
+        "context does not contain the answer, say so plainly rather than "
+        "guessing or padding — don't invent a meeting, task or decision that "
+        "isn't in the context."
     )
     full_prompt = f"{system_msg}\n\n{context_prompt}\n\nQuestion: {question}\nAnswer:"
     payload = {
         "model": model,
         "prompt": full_prompt,
         "stream": False,
-        # Low temperature keeps answers to what the transcript says; the token
-        # cap keeps a spoken reply short and bounds latency on a slow CPU.
-        "options": {"temperature": 0.2, "num_predict": 160},
+        # Low temperature keeps answers to what the context says, not the
+        # model's imagination. The token cap bounds latency on a slow CPU;
+        # "written" answers get more room since they may need to list several
+        # items rather than name just one.
+        "options": {"temperature": 0.2, "num_predict": 160 if style == "spoken" else 450},
+        # Ollama's default is to unload a model 5 minutes after its last use.
+        # Measured on a weak 2-core CPU: ~75s to load qwen2.5:7b cold vs. ~7s
+        # once warm — reloading between two questions in the same meeting is
+        # the difference between Alina answering promptly and seeming to
+        # ignore the wake word for over a minute. Keep it resident through a
+        # normal meeting instead.
+        "keep_alive": "30m",
     }
 
     try:
-        # A cold model load on a modest CPU measured ~25s before the first
-        # token, so the old 45s ceiling left little margin.
-        async with httpx.AsyncClient(timeout=90) as client:
+        # qwen2.5:7b on a weak 2-core CPU has measured well over 60s for a
+        # cold model load plus generation — the old 90s ceiling was cutting
+        # that close enough to fall back to the canned answer more often
+        # than it should. Alina always replies with *something* either way
+        # (the except below never raises), but a completed LLM answer beats
+        # the generic fallback whenever there is time for one.
+        async with httpx.AsyncClient(timeout=150) as client:
             response = await client.post(f"{base_url}/api/generate", json=payload)
             if response.status_code == 404:
                 # The configured model isn't pulled. Previously this fell
@@ -94,30 +146,72 @@ async def _ask_llm(context_prompt: str, question: str) -> str:
     return _fallback_answer(context_prompt, question)
 
 
+# A question wants this section if any of its trigger words appear.
+_FALLBACK_INTENTS: list[tuple[str, tuple[str, ...]]] = [
+    ("Action Items", (
+        "task", "action", "assign", "who", "pending", "open", "todo", "overdue",
+        "kaam", "kis ne", "kisko", "baqi", "project", "new update", "status",
+    )),
+    ("Decisions", ("decid", "decision", "agree", "faisla", "tay")),
+    ("Summary", ("summary", "about", "overview", "khulasa", "kya baat")),
+]
+
+
 def _fallback_answer(context_prompt: str, question: str) -> str:
     """Answer from the context itself when no LLM is reachable.
 
-    The old fallback returned the same stock sentence ("refer to the tab")
-    whatever was asked, which sounds like an answer but tells nobody anything.
-    This quotes what the context actually holds for the kind of question asked.
+    `context_prompt` may describe one meeting or several, each starting with
+    a "Meeting: <title>" line. A question about tasks or decisions gets every
+    matching section from every meeting block — not just whichever meeting's
+    lines happened to appear last, which is what a flat key→value scan over
+    the whole prompt would silently collapse to.
     """
-    lines = {
-        key: value.strip()
-        for key, _, value in (line.partition(": ") for line in context_prompt.splitlines())
-        if key in {"Decisions", "Action Items", "Summary"} and value.strip()
-    }
+    blocks = re.split(r"(?=^Meeting: )", context_prompt, flags=re.MULTILINE)
+    meetings: list[dict[str, str]] = []
+    for block in blocks:
+        if not block.strip():
+            continue
+        title = "This meeting"
+        fields: dict[str, str] = {}
+        for line in block.splitlines():
+            key, sep, value = line.partition(": ")
+            if not sep:
+                continue
+            if key == "Meeting" or key == "Meeting Title":
+                title = value.strip()
+            elif key in {"Decisions", "Action Items", "Summary"} and value.strip():
+                fields[key] = value.strip()
+        if fields:
+            meetings.append({"title": title, **fields})
+
+    if not meetings:
+        return "I don't have enough notes yet to answer that — try again once a meeting has been analyzed."
+
     q_lower = question.lower()
-    wants = [
-        ("Decisions", ("decid", "decision", "agree", "faisla", "tay")),
-        ("Action Items", ("task", "action", "assign", "who", "kaam", "kis ne", "kisko")),
-        ("Summary", ("summary", "about", "overview", "khulasa", "kya baat")),
-    ]
-    for key, words in wants:
-        if any(w in q_lower for w in words) and key in lines:
-            return f"{key}: {lines[key]}"
-    if "Summary" in lines:
-        return lines["Summary"]
-    return "I don't have enough from this meeting yet to answer that."
+    explicit_key = next(
+        (key for key, words in _FALLBACK_INTENTS if any(w in q_lower for w in words)),
+        None,
+    )
+    wanted_key = explicit_key or "Summary"
+    matches = [(m["title"], wanted_key, m[wanted_key]) for m in meetings if wanted_key in m]
+    if not matches:
+        # Nothing for the section the question seems to want — fall back to
+        # whatever each meeting does have, in a fixed order of preference.
+        for key in ("Summary", "Action Items", "Decisions"):
+            matches = [(m["title"], key, m[key]) for m in meetings if key in m]
+            if matches:
+                break
+
+    if not matches:
+        return "I don't have enough notes yet to answer that."
+    # A single meeting answering with the section it fell back to on its own
+    # (nothing in the question pointed at Decisions/Action Items/Summary)
+    # reads better as the bare fact, not a label nobody asked for.
+    if len(matches) == 1 and not explicit_key:
+        return matches[0][2]
+    if len(matches) == 1:
+        return f"{matches[0][1]}: {matches[0][2]}"
+    return "\n".join(f"- {title} — {key}: {value}" for title, key, value in matches)
 
 
 @router.post("/ask", response_model=QuestionResponse)
@@ -150,7 +244,8 @@ async def ask_meeting_question(
         context_lines.append(
             "Action Items: "
             + "; ".join(
-                f"{t.task} (Assigned to {t.assignee or 'Unassigned'}, Due: {t.deadline or 'TBD'})"
+                f"{t.task} (Assigned to {t.assignee or 'Unassigned'}, "
+                f"Status: {t.status}, Due: {t.deadline or 'TBD'})"
                 for t in tasks
             )
         )
@@ -163,7 +258,9 @@ async def ask_meeting_question(
 
     context_str = "\n\n".join(context_lines)
 
-    answer = await _ask_llm(context_str, request.question)
+    # This tab is read on screen, never spoken — unlike the wake-word reply
+    # in a live meeting, it can afford a real list when the question wants one.
+    answer = await _ask_llm(context_str, request.question, style="written")
 
     sources = []
     if summary_obj:

@@ -208,3 +208,29 @@ def format_due(due_at: datetime | None) -> str | None:
     if local.hour == _DEFAULT_HOUR and local.minute == _DEFAULT_MINUTE:
         return local.strftime("%a %d %b %Y")
     return f"{local.strftime('%a %d %b %Y')}, {local.strftime('%I:%M %p').lstrip('0')}"
+
+
+def days_left_phrase(due_at: datetime | None, now: datetime | None = None) -> str | None:
+    """How far away a deadline is, in words — 'due today', '3 days left', 'overdue by 2 days'.
+
+    Compares calendar days in the local timezone (not raw hours), so a
+    deadline later tonight still reads as "due today" rather than "0 days
+    left". Used in notifications so an assignee sees the remaining time at a
+    glance, not just a date they have to do the math on.
+    """
+    if due_at is None:
+        return None
+    now = now or datetime.now().astimezone()
+    if now.tzinfo is None:
+        now = now.astimezone()
+    local_due = due_at.replace(tzinfo=timezone.utc).astimezone(now.tzinfo)
+    day_diff = (local_due.date() - now.date()).days
+
+    if day_diff < 0:
+        overdue = -day_diff
+        return f"overdue by {overdue} day{'s' if overdue != 1 else ''}"
+    if day_diff == 0:
+        return "due today"
+    if day_diff == 1:
+        return "due tomorrow"
+    return f"{day_diff} days left"

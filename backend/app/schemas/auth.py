@@ -43,13 +43,38 @@ class TeamMember(BaseModel):
     role: str = "employee"
 
 
-class AdminUserCreate(BaseModel):
+class AdminUserInvite(BaseModel):
+    """Add an employee by name and email only — no password.
+
+    They get a link (emailed when SMTP is configured, always also returned
+    here so the admin can share it directly) that lets them set their own
+    password. Nobody but the employee ever has it.
+    """
+
     email: EmailStr
     full_name: str = Field(min_length=1, max_length=200)
-    password: str = Field(min_length=8, max_length=128)
     role: Literal["admin", "employee"] = "employee"
+
+
+class AdminUserInviteResponse(BaseModel):
+    user: UserResponse
+    invite_link: str
+    email_sent: bool
 
 
 class AdminUserUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=1, max_length=200)
     role: Literal["admin", "employee"] | None = None
+
+
+class AcceptInviteRequest(BaseModel):
+    token: str
+    password: str = Field(min_length=8, max_length=128)
+
+
+class InviteDetails(BaseModel):
+    """What the accept-invite page shows before the person sets a password."""
+
+    email: EmailStr
+    full_name: str | None = None
+    workspace_name: str | None = None

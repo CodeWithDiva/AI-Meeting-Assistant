@@ -149,6 +149,11 @@ async def analyze_with_ollama(
         # Near-zero temperature: notes must reflect the transcript, not the
         # model's imagination.
         "options": {"temperature": 0.1, "num_ctx": 8192},
+        # Keep the model resident — see the matching note in chat.py's
+        # _ask_llm. A meeting's wake-word replies and its end-of-meeting
+        # analysis both use this model; without this they fight the 5-minute
+        # idle-unload and each pay a ~75s cold-load penalty independently.
+        "keep_alive": "30m",
     }
 
     async with httpx.AsyncClient(timeout=300) as client:

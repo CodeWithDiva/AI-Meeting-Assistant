@@ -1,0 +1,94 @@
+"""Asking Alina from the dashboard should answer from across every meeting,
+not just one — with real registered names used for task assignment too.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+
+from fastapi.testclient import TestClient
+
+from app.database import SessionLocal
+from app.main import app
+from app.services.meeting_analysis import analyze_and_persist
+
+client = TestClient(app)
+
+
+def _register(first_name: str) -> tuple[dict, dict]:
+    tag = uuid.uuid4().hex[:8]
+    email = f"{first_name.lower()}-{tag}@example.com"
+    res = client.post(
+        "/api/auth/register",
+        json={"email": email, "password": "password123", "full_name": f"{first_name} T{tag}"},
+    )
+    assert res.status_code == 201
+    token = client.post("/api/auth/login", json={"email": email, "password": "password123"})
+    return res.json(), {"Authorization": f"Bearer {token.json()['access_token']}"}
+
+
+def test_asking_with_no_meetings_says_so_instead_of_guessing() -> None:
+    _, headers = _register("Kamran")
+    res = client.post("/api/workspace/ask", json={"question": "What did we decide?"}, headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["sources"] == []
+    assert "meeting" in body["answer"].lower()
+
+
+def test_a_question_pulls_context_from_the_matching_meeting_and_cites_it() -> None:
+    _, headers = _register("Kamran")
+
+    meeting = client.post(
+        "/api/meetings", json={"title": "Q1 budget review"}, headers=headers
+    ).json()
+    client.patch(
+        f"/api/meetings/{meeting['id']}",
+        json={"transcript": "[Ali]: We agreed to cap the marketing budget at 50000 for Q1."},
+        headers=headers,
+    )
+    analyze = client.post(f"/api/meetings/{meeting['id']}/analyze", headers=headers)
+    assert analyze.status_code == 200
+
+    res = client.post(
+        "/api/workspace/ask", json={"question": "What was decided about the Q1 budget?"}, headers=headers
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert any(s["meeting_id"] == meeting["id"] for s in body["sources"])
+    assert body["answer"]
+
+
+def test_analysis_is_told_the_real_registered_names_for_assignment(monkeypatch) -> None:
+    """`analyze_and_persist` must hand the LLM every registered name, not just
+    who the bot saw on the call — someone often hands work to a person who
+    wasn't in the meeting. This stubs the LLM call itself: whether the model
+    then *uses* that roster well is Ollama's job, not this test's, and
+    asserting on a real model's output would make the suite depend on
+    whatever is installed and how loaded the machine is.
+    """
+    owner, owner_headers = _register("Kamran")
+    employee, _ = _register("Zunaira")
+
+    meeting = client.post("/api/meetings", json={"title": "Sprint planning"}, headers=owner_headers).json()
+    client.patch(
+        f"/api/meetings/{meeting['id']}",
+        json={"transcript": f"[Kamran]: {employee['full_name']} will own the migration script."},
+        headers=owner_headers,
+    )
+
+    seen_rosters: list[list[str] | None] = []
+
+    async def fake_analyze_meeting(transcript: str, participants=None):
+        seen_rosters.append(participants)
+        return {"summary": "", "decisions": [], "action_items": []}
+
+    monkeypatch.setattr("app.services.meeting_analysis.analyze_meeting", fake_analyze_meeting)
+
+    with SessionLocal() as db:
+        asyncio.run(analyze_and_persist(meeting["id"], db))
+
+    assert seen_rosters and employee["full_name"] in seen_rosters[0]
+    # Every registered member is offered, not only people the bot saw on the call.
+    assert owner["full_name"] in seen_rosters[0]

@@ -31,14 +31,24 @@ export interface Decision {
   text: string;
 }
 
+export type TaskPriority = "low" | "medium" | "high";
+export type TaskStatus = "pending" | "in_progress" | "done";
+
 export interface ActionItem {
   id: number;
   meeting_id: number;
+  meeting_title?: string | null;
   assignee?: string | null;
+  assignee_user_id?: number | null;
+  assignee_email?: string | null;
   assigned_by?: string | null;
   task: string;
   deadline?: string | null;
-  status: "pending" | "in_progress" | "done" | string;
+  due_at?: string | null;
+  priority: TaskPriority | string;
+  status: TaskStatus | string;
+  is_overdue?: boolean;
+  completed_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -84,8 +94,13 @@ export interface DashboardStats {
   total_meetings: number;
   total_tasks: number;
   pending_tasks: number;
+  in_progress_tasks: number;
   done_tasks: number;
   recent_meetings: number;
+  overdue_tasks: number;
+  due_soon_tasks: number;
+  my_open_tasks: number;
+  completion_rate: number;
 }
 
 export interface Recording {
@@ -148,8 +163,12 @@ export interface AgentLeaveResult {
   notes: AgentNotesReport;
 }
 
-/** Which optional parts of the stack are actually installed on the server. */
+/** Which optional parts of the stack are actually installed / configured on the server. */
 export interface SystemCapabilities {
+  assistant_name: string;
+  wake_word: string;
+  email_notifications: boolean;
+  virtual_microphone: boolean;
   platforms: string[];
   browser_automation: boolean;
   audio_devices: boolean;
@@ -187,6 +206,12 @@ export interface ChatAnswer {
   sources: string[];
 }
 
+export interface WorkspaceAnswer {
+  question: string;
+  answer: string;
+  sources: Array<{ meeting_id: number; title: string }>;
+}
+
 export interface NotificationItem {
   id: number;
   user_id: number;
@@ -203,9 +228,70 @@ export interface AdminUser {
   email: string;
   full_name?: string | null;
   role: "admin" | "employee" | string;
+  /** "invited" — added by an admin, hasn't set a password yet. "active" — can sign in. */
+  status: "invited" | "active";
   created_at?: string | null;
   meeting_count: number;
   task_count: number;
+  open_tasks: number;
+  overdue_tasks: number;
+  done_tasks: number;
+}
+
+export interface InviteResult {
+  user: User;
+  invite_link: string;
+  email_sent: boolean;
+}
+
+export interface InviteDetails {
+  email: string;
+  full_name?: string | null;
+  workspace_name?: string | null;
+}
+
+/** Anyone a task can be assigned to. */
+export interface TeamMember {
+  id: number;
+  email: string;
+  full_name?: string | null;
+  role: "admin" | "employee" | string;
+}
+
+export interface WorkspaceSearchResult {
+  query: string;
+  meetings: Array<{ id: number; title: string; platform?: string | null; created_at?: string | null }>;
+  transcript: Array<{ meeting_id: number; meeting_title: string; speaker: string | null; text: string; start_time: number }>;
+  decisions: Array<{ meeting_id: number; meeting_title: string; text: string }>;
+  tasks: ActionItem[];
+}
+
+export interface AdminAnalytics {
+  totals: {
+    members: number;
+    meetings: number;
+    meetings_this_week: number;
+    tasks: number;
+    open_tasks: number;
+    overdue_tasks: number;
+    unassigned_open_tasks: number;
+    completion_rate: number;
+  };
+  status_counts: { pending: number; in_progress: number; done: number };
+  weeks: Array<{ week_start: string; meetings: number; tasks_created: number; tasks_completed: number }>;
+  workload: Array<{
+    user_id: number;
+    name: string;
+    email: string;
+    role: string;
+    meetings_owned: number;
+    assigned: number;
+    open: number;
+    overdue: number;
+    done: number;
+    completion_rate: number | null;
+  }>;
+  overdue: ActionItem[];
 }
 
 export interface VoiceReplyResult {
@@ -285,6 +371,30 @@ async function apiRequest<T>(
   return data as T;
 }
 
+/** Trigger a file download for an authenticated GET endpoint (blob response). */
+async function downloadFile(endpoint: string, fallbackName: string): Promise<void> {
+  const token = authStorage.getToken();
+  const response = await fetch(`${getApiBase()}${endpoint}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data?.detail || "Download failed.");
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const match = /filename="?([^"]+)"?/.exec(disposition);
+  const filename = match?.[1] || fallbackName;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
   // Auth
   async login(email: string, password: string): Promise<AuthResponse> {
@@ -298,15 +408,27 @@ export const api = {
     return res;
   },
 
-  async register(email: string, password: string): Promise<User> {
+  async register(email: string, password: string, fullName?: string): Promise<User> {
     return apiRequest<User>("/api/auth/register", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, full_name: fullName || undefined }),
     });
   },
 
   async getMe(): Promise<User> {
     return apiRequest<User>("/api/auth/me");
+  },
+
+  async updateProfile(fullName: string): Promise<User> {
+    return apiRequest<User>("/api/auth/me", {
+      method: "PATCH",
+      body: JSON.stringify({ full_name: fullName }),
+    });
+  },
+
+  /** Everyone tasks can be assigned to — used to populate the assignee picker. */
+  async getTeamMembers(): Promise<TeamMember[]> {
+    return apiRequest<TeamMember[]>("/api/auth/users");
   },
 
   // Meetings
@@ -349,6 +471,12 @@ export const api = {
     });
   },
 
+  /** Download the meeting's notes/transcript as a Markdown file. */
+  async exportMeeting(id: number | string, title: string): Promise<void> {
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || `meeting-${id}`;
+    return downloadFile(`/api/meetings/${id}/export.md`, `${slug}.md`);
+  },
+
   // Audio Upload & Transcription
   async uploadAudio(
     meetingId: number | string,
@@ -389,9 +517,12 @@ export const api = {
   },
 
   // Tasks
-  async getAllTasks(status?: string): Promise<ActionItem[]> {
-    const query = status ? `?status=${status}` : "";
-    return apiRequest<ActionItem[]>(`/api/tasks${query}`);
+  async getAllTasks(status?: string, scope?: "all" | "assigned" | "created"): Promise<ActionItem[]> {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (scope) params.set("scope", scope);
+    const query = params.toString();
+    return apiRequest<ActionItem[]>(`/api/tasks${query ? `?${query}` : ""}`);
   },
 
   async getMeetingTasks(meetingId: number | string): Promise<ActionItem[]> {
@@ -400,7 +531,15 @@ export const api = {
 
   async updateTask(
     taskId: number,
-    data: { status?: string; task?: string; assignee?: string; deadline?: string }
+    data: {
+      status?: string;
+      task?: string;
+      assignee?: string;
+      assignee_user_id?: number | null;
+      deadline?: string;
+      due_at?: string | null;
+      priority?: TaskPriority;
+    }
   ): Promise<ActionItem> {
     return apiRequest<ActionItem>(`/api/tasks/${taskId}`, {
       method: "PATCH",
@@ -410,7 +549,15 @@ export const api = {
 
   async createTask(
     meetingId: number | string,
-    data: { task: string; assignee?: string; assigned_by?: string; deadline?: string }
+    data: {
+      task: string;
+      assignee?: string;
+      assignee_user_id?: number | null;
+      assigned_by?: string;
+      deadline?: string;
+      due_at?: string | null;
+      priority?: TaskPriority;
+    }
   ): Promise<ActionItem> {
     return apiRequest<ActionItem>(`/api/tasks/meeting/${meetingId}`, {
       method: "POST",
@@ -426,6 +573,11 @@ export const api = {
         Authorization: `Bearer ${token}`,
       },
     });
+  },
+
+  async downloadTaskInvite(taskId: number, taskText: string): Promise<void> {
+    const slug = taskText.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/(^-|-$)/g, "");
+    return downloadFile(`/api/tasks/${taskId}/calendar.ics`, `${slug || "task"}.ics`);
   },
 
   // Dashboard Stats
@@ -473,12 +625,27 @@ export const api = {
     });
   },
 
+  /** Search across every meeting, transcript line, decision and task in the workspace. */
+  async searchWorkspace(query: string, limit: number = 8): Promise<WorkspaceSearchResult> {
+    return apiRequest<WorkspaceSearchResult>(
+      `/api/workspace/search?q=${encodeURIComponent(query)}&limit=${limit}`
+    );
+  },
+
   // AI Meeting Chat & Q&A Copilot (Block 2)
   async askMeetingQuestion(
     meetingId: number | string,
     question: string
   ): Promise<ChatAnswer> {
     return apiRequest<ChatAnswer>(`/api/meetings/${meetingId}/chat/ask`, {
+      method: "POST",
+      body: JSON.stringify({ question }),
+    });
+  },
+
+  /** Ask Alina something grounded across every meeting in the workspace, not just one. */
+  async askWorkspace(question: string): Promise<WorkspaceAnswer> {
+    return apiRequest<WorkspaceAnswer>("/api/workspace/ask", {
       method: "POST",
       body: JSON.stringify({ question }),
     });
@@ -503,7 +670,7 @@ export const api = {
   // The join runs in the background; watch `agent_state` on the meeting
   // WebSocket for JOINING → IN_MEETING → PROCESSING → COMPLETE.
   //
-  // mode "agent"  — the browser bot joins the meeting itself (needs a link).
+  // mode "agent"  — the browser bot joins the meeting itself (Zoom or Google Meet).
   // mode "attach" — you join the meeting in your own app; the assistant only
   //                 listens through the capture device (link optional, title used).
   async sendAgentToMeeting(
@@ -553,9 +720,14 @@ export const api = {
     return apiRequest<SystemCapabilities>("/api/system/capabilities");
   },
 
-  // Notifications (Block 5)
+  // Notifications
   async getNotifications(unreadOnly: boolean = false): Promise<NotificationItem[]> {
     return apiRequest<NotificationItem[]>(`/api/notifications${unreadOnly ? "?unread_only=true" : ""}`);
+  },
+
+  async getUnreadNotificationCount(): Promise<number> {
+    const res = await apiRequest<{ unread: number }>("/api/notifications/unread-count");
+    return res.unread;
   },
 
   async markNotificationRead(notificationId: number): Promise<NotificationItem> {
@@ -570,9 +742,58 @@ export const api = {
     });
   },
 
-  // Admin — Users list (admin only)
+  // Admin — Users
   async getAdminUsers(): Promise<AdminUser[]> {
     return apiRequest<AdminUser[]>("/api/auth/admin/users");
+  },
+
+  /** Add an employee by name + email only — no password to hand out. Returns a
+   *  one-time setup link, always, regardless of whether an email went out. */
+  async adminInviteUser(data: { email: string; full_name: string; role: "admin" | "employee" }): Promise<InviteResult> {
+    return apiRequest<InviteResult>("/api/auth/admin/users", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async adminResendInvite(userId: number): Promise<InviteResult> {
+    return apiRequest<InviteResult>(`/api/auth/admin/users/${userId}/resend-invite`, {
+      method: "POST",
+    });
+  },
+
+  async adminUpdateUser(userId: number, data: { full_name?: string; role?: "admin" | "employee" }): Promise<User> {
+    return apiRequest<User>(`/api/auth/admin/users/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async adminDeleteUser(userId: number): Promise<void> {
+    const token = authStorage.getToken();
+    await fetch(`${getApiBase()}/api/auth/admin/users/${userId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  },
+
+  // Invites — accepted by the invited person, no auth required
+  async getInvite(inviteToken: string): Promise<InviteDetails> {
+    return apiRequest<InviteDetails>(`/api/auth/invite/${inviteToken}`);
+  },
+
+  async acceptInvite(inviteToken: string, password: string): Promise<AuthResponse> {
+    const res = await apiRequest<AuthResponse>("/api/auth/accept-invite", {
+      method: "POST",
+      body: JSON.stringify({ token: inviteToken, password }),
+    });
+    if (res.access_token) authStorage.setToken(res.access_token);
+    return res;
+  },
+
+  /** Admin-only: meeting volume, task health, and each member's workload. */
+  async getAdminAnalytics(): Promise<AdminAnalytics> {
+    return apiRequest<AdminAnalytics>("/api/admin/analytics");
   },
 
   // Voice Reply — manual test (dev/prod)
@@ -593,7 +814,7 @@ export const api = {
     return apiRequest(`/api/meetings/${meetingId}/voice-reply/latest`);
   },
 
-  // Real-time WebSocket for meeting events (Ava replies, agent state, live transcript)
+  // Real-time WebSocket for meeting events (assistant replies, agent state, live transcript)
   getMeetingWebSocketUrl(meetingId: number | string): string {
     const base = getApiBase().replace(/^http/, "ws");
     return `${base}/api/meetings/${meetingId}/ws`;

@@ -7,7 +7,8 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.auth import get_current_user
@@ -18,13 +19,24 @@ from app.models import (
     Meeting,
     Participant,
     Speaker,
+    Summary,
     TranscriptSegment,
     User,
 )
+from app.routers.chat import _ask_llm
 from app.routers.tasks import _visible_tasks_query, serialize_task
 from app.services.deadlines import format_due
 
 router = APIRouter(tags=["workspace"])
+
+# Words too common to narrow a keyword search — kept lowercase.
+_STOPWORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "what", "who", "when",
+    "where", "why", "how", "did", "does", "do", "have", "has", "had",
+    "about", "with", "from", "that", "this", "for", "and", "our", "any",
+    "kya", "kis", "kab", "kahan", "kyun", "hai", "hain", "tha", "the", "ka",
+    "ki", "ke", "ko", "se", "aur", "me", "mein", "par", "wala", "wali",
+}
 
 
 def _utcnow() -> datetime:
@@ -107,6 +119,115 @@ def search_workspace(
         ],
         "tasks": [serialize_task(t).model_dump(mode="json") for t in tasks],
     }
+
+
+# ── Ask Alina across the whole workspace ────────────────────────────────
+
+
+class WorkspaceQuestion(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+
+
+class WorkspaceAnswer(BaseModel):
+    question: str
+    answer: str
+    sources: list[dict]
+
+
+def _keywords(question: str) -> list[str]:
+    words = re.findall(r"[a-zA-Z؀-ۿ]{4,}", question.lower())
+    return [w for w in words if w not in _STOPWORDS][:6]
+
+
+@router.post("/api/workspace/ask", response_model=WorkspaceAnswer)
+async def ask_workspace(
+    request: WorkspaceQuestion,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> WorkspaceAnswer:
+    """Ask Alina something grounded in the whole workspace, not one meeting.
+
+    Meetings the question's own words show up in are favoured, topped up with
+    the most recent meetings so a vague question ("what's still open?") still
+    gets an answer — capped low enough to keep the prompt fast on a modest CPU.
+    """
+    scope = _meeting_scope(user)
+    keywords = _keywords(request.question)
+
+    matched_ids: list[int] = []
+    if keywords:
+        like_clause = or_(*[
+            Meeting.title.ilike(f"%{kw}%")
+            | Summary.text.ilike(f"%{kw}%")
+            | Decision.text.ilike(f"%{kw}%")
+            for kw in keywords
+        ])
+        matched_ids = list(db.scalars(
+            select(Meeting.id)
+            .outerjoin(Summary, Summary.meeting_id == Meeting.id)
+            .outerjoin(Decision, Decision.meeting_id == Meeting.id)
+            .where(scope, like_clause)
+            .distinct()
+            .order_by(Meeting.created_at.desc())
+            .limit(6)
+        ))
+
+    recent_ids = list(db.scalars(
+        select(Meeting.id).where(scope).order_by(Meeting.created_at.desc()).limit(5)
+    ))
+    meeting_ids = list(dict.fromkeys(matched_ids + recent_ids))[:8]
+
+    if not meeting_ids:
+        return WorkspaceAnswer(
+            question=request.question,
+            answer="There aren't any meetings in the workspace yet to answer that from.",
+            sources=[],
+        )
+
+    meetings = list(
+        db.scalars(
+            select(Meeting)
+            .options(
+                selectinload(Meeting.summary),
+                selectinload(Meeting.decisions),
+                selectinload(Meeting.action_items),
+            )
+            .where(Meeting.id.in_(meeting_ids))
+            .order_by(Meeting.created_at.desc())
+        )
+    )
+
+    context_blocks = []
+    sources = []
+    for meeting in meetings:
+        lines = [f"Meeting: {meeting.title}"]
+        if meeting.summary and meeting.summary.text:
+            lines.append(f"Summary: {meeting.summary.text}")
+        if meeting.decisions:
+            lines.append("Decisions: " + "; ".join(d.text for d in meeting.decisions))
+        if meeting.action_items:
+            lines.append(
+                "Action Items: "
+                + "; ".join(
+                    f"{t.task} (Assigned to {t.assignee or 'Unassigned'}, "
+                    f"Status: {t.status}, Due: {t.deadline or 'TBD'})"
+                    for t in meeting.action_items
+                )
+            )
+        if len(lines) > 1:
+            context_blocks.append("\n".join(lines))
+            sources.append({"meeting_id": meeting.id, "title": meeting.title})
+
+    if not context_blocks:
+        return WorkspaceAnswer(
+            question=request.question,
+            answer="Those meetings don't have notes yet — run \"Generate notes\" on them first.",
+            sources=[],
+        )
+
+    context = "\n\n".join(context_blocks)
+    answer = await _ask_llm(context, request.question, style="written")
+    return WorkspaceAnswer(question=request.question, answer=answer, sources=sources)
 
 
 # ── Export ──────────────────────────────────────────────────────────────

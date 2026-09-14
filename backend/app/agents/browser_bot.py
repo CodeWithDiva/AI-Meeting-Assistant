@@ -541,17 +541,23 @@ class BrowserMeetingBot:
             pass
 
     async def _sync_participants(self, names: list[str]) -> None:
-        """Persist newly-seen attendees so tasks can be matched to real people."""
-        from app.database import SessionLocal
-        from app.models import Participant
+        """Persist newly-seen attendees and tell the meeting owner who joined.
 
-        def _write() -> None:
+        Runs off the roster poll, so a name only triggers a notification the
+        first time it is seen — nobody gets pinged again just because the
+        roster was re-read a few seconds later.
+        """
+        from app.database import SessionLocal
+        from app.models import Meeting, Notification, Participant
+
+        def _write() -> list[str]:
             with SessionLocal() as db:
                 known = {
                     p.name for p in db.scalars(
                         select(Participant).where(Participant.meeting_id == self.meeting_id)
                     )
                 }
+                newly_seen: list[str] = []
                 for name in names:
                     if name in known or name == BOT_DISPLAY_NAME:
                         continue
@@ -561,7 +567,26 @@ class BrowserMeetingBot:
                         role="human",
                         joined_at=datetime.now(timezone.utc).replace(tzinfo=None),
                     ))
+                    newly_seen.append(name)
+
+                if newly_seen:
+                    meeting = db.get(Meeting, self.meeting_id)
+                    if meeting:
+                        body = (
+                            f"{newly_seen[0]} joined {meeting.title}"
+                            if len(newly_seen) == 1
+                            else f"{', '.join(newly_seen)} joined {meeting.title}"
+                        )
+                        db.add(Notification(
+                            user_id=meeting.owner_id,
+                            meeting_id=self.meeting_id,
+                            type="participant_joined",
+                            title="Someone joined the meeting" if len(newly_seen) == 1 else "People joined the meeting",
+                            body=body,
+                            read=False,
+                        ))
                 db.commit()
+                return newly_seen
 
         await asyncio.get_event_loop().run_in_executor(None, _write)
 

@@ -115,7 +115,11 @@ Base.metadata.create_all(bind=engine)
 
 # Keep local MVP databases compatible when a new persisted field is introduced.
 _ADDED_COLUMNS = {
-    "users": {"role": "VARCHAR(20) DEFAULT 'employee'"},
+    "users": {
+        "role": "VARCHAR(20) DEFAULT 'employee'",
+        "invite_token": "VARCHAR(64)",
+        "invite_expires_at": "DATETIME",
+    },
     "action_items": {
         "priority": "VARCHAR(10) DEFAULT 'medium'",
         "due_at": "DATETIME",

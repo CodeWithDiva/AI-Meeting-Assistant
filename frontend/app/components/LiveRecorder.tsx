@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, Segment } from "@/lib/api";
+import Icon from "./Icon";
 
 interface LiveRecorderProps {
   meetingId: number;
@@ -171,24 +172,17 @@ export default function LiveRecorder({
   return (
     <div
       style={{
-        background: isRecording
-          ? "linear-gradient(135deg, rgba(244, 63, 94, 0.12) 0%, rgba(20, 24, 40, 0.95) 100%)"
-          : "linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(15, 18, 30, 0.8) 100%)",
-        border: isRecording
-          ? "1px solid rgba(244, 63, 94, 0.45)"
-          : "1px solid var(--border-card)",
+        background: isRecording ? "var(--tint-rose)" : "var(--bg-card)",
+        border: isRecording ? "1px solid color-mix(in srgb, var(--accent-rose) 35%, transparent)" : "1px solid var(--border-card)",
         borderRadius: "var(--radius-md)",
-        padding: "16px 20px",
+        padding: "14px 18px",
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
         flexWrap: "wrap",
         gap: 14,
-        marginBottom: 22,
-        boxShadow: isRecording
-          ? "0 0 25px rgba(244, 63, 94, 0.25)"
-          : "var(--shadow-sm)",
-        transition: "all 0.25s ease",
+        marginBottom: 20,
+        transition: "all 0.2s ease",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
@@ -199,21 +193,21 @@ export default function LiveRecorder({
         >
           {isRecording ? (
             <>
-              <span className="status-dot status-dot-recording" />
-              <span>Stop Live Mic</span>
+              <span className="status-dot status-dot-recording" style={{ background: "currentColor" }} />
+              <span>Stop live mic</span>
             </>
           ) : (
             <>
-              <span>🎙️</span>
-              <span>Start Live Mic</span>
+              <Icon name="mic" size={14} />
+              <span>Start live mic</span>
             </>
           )}
         </button>
 
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 14, fontWeight: 700, color: "#ffffff" }}>
-              {isRecording ? "Active Voice Capture" : "Real-Time Microphone Stream"}
+            <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text-primary)" }}>
+              {isRecording ? "Active voice capture" : "Real-time microphone stream"}
             </span>
             {isRecording && <span className="badge badge-rose">LIVE</span>}
           </div>
@@ -228,18 +222,18 @@ export default function LiveRecorder({
           style={{
             flex: 1,
             minWidth: 240,
-            background: "rgba(10, 13, 22, 0.9)",
+            background: "var(--bg-surface)",
             padding: "8px 14px",
             borderRadius: "var(--radius-sm)",
-            fontSize: 13,
-            color: "#f8fafc",
-            border: "1px solid rgba(244, 63, 94, 0.3)",
+            fontSize: 12.5,
+            color: "var(--text-secondary)",
+            border: "1px solid var(--border-card)",
             display: "flex",
             alignItems: "center",
             gap: 8,
           }}
         >
-          <span style={{ color: "#fb7185", fontSize: 14 }}>💬</span>
+          <Icon name="message" size={13} className="mono" />
           <span style={{ fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             &ldquo;{livePreviewText}&rdquo;
           </span>

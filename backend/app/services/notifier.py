@@ -33,7 +33,7 @@ from sqlalchemy import event, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import ActionItem, Meeting, Notification, User
-from app.services.deadlines import format_due
+from app.services.deadlines import days_left_phrase, format_due
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +52,21 @@ def email_enabled() -> bool:
     return bool(os.getenv("SMTP_HOST", "").strip())
 
 
-def due_label(item: ActionItem) -> str | None:
-    """The deadline as people said it, plus the resolved date when that adds something."""
+def due_label(item: ActionItem, *, with_days_left: bool = False) -> str | None:
+    """The deadline as people said it, plus the resolved date when that adds something.
+
+    `with_days_left` appends how much time remains — "3 days left", "due
+    today", "overdue by 2 days" — so a notification tells the assignee the
+    remaining time without them having to work it out from a date.
+    """
     pretty = format_due(item.due_at)
     spoken = (item.deadline or "").strip()
-    if spoken and pretty and spoken.casefold() not in pretty.casefold():
-        return f"{spoken} ({pretty})"
-    return spoken or pretty
+    label = f"{spoken} ({pretty})" if spoken and pretty and spoken.casefold() not in pretty.casefold() else (spoken or pretty)
+    if with_days_left and item.due_at is not None:
+        remaining = days_left_phrase(item.due_at)
+        if remaining:
+            label = f"{label} — {remaining}" if label else remaining.capitalize()
+    return label
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +98,7 @@ def notify_task_assigned(
     if assignee is None:
         return None
 
-    due = due_label(item)
+    due = due_label(item, with_days_left=True)
     notification = Notification(
         user_id=assignee.id,
         meeting_id=meeting.id,
@@ -162,7 +170,7 @@ def run_deadline_sweep(
         recipient = item.assignee_user or db.get(User, meeting.owner_id)
         if recipient is None:
             continue
-        due = due_label(item)
+        due = due_label(item, with_days_left=True)
 
         if item.due_at <= now:
             if item.overdue_notified_at is not None:
@@ -272,6 +280,30 @@ def _ics_escape(value: str) -> str:
     return (
         value.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
     )
+
+
+# ---------------------------------------------------------------------------
+# Team invites
+# ---------------------------------------------------------------------------
+
+
+def send_invite_email(db: Session, *, to: str, full_name: str, invite_link: str) -> None:
+    """Queue the "you've been added to the team" email with the setup link.
+
+    Same queue-until-commit mechanism as task emails — a no-op when
+    SMTP_HOST isn't configured, so the caller must still hand the admin the
+    link directly rather than assuming this reached anyone.
+    """
+    first_name = full_name.split()[0] if full_name.strip() else full_name
+    text = (
+        f"Hi {first_name},\n\n"
+        "You've been added to the AI Meeting Assistant workspace.\n\n"
+        "Set your password to get started:\n"
+        f"  {invite_link}\n\n"
+        "This link works once and expires in 7 days.\n\n"
+        "— AI Meeting Assistant"
+    )
+    _queue_email(db, to=to, subject="You've been added to the team", text=text)
 
 
 # ---------------------------------------------------------------------------

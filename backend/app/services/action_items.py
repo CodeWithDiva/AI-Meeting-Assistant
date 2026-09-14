@@ -64,6 +64,16 @@ def resolve_assignee(name: str | None, db: Session) -> User | None:
     match (so "Ali" finds "Ali Khan", but not if two users are named Ali).
     Returns None rather than risk assigning to the wrong person.
     """
+    if name and "@" in name:
+        # An email must be matched on the raw string. normalize_person_name
+        # below treats "." and "-" as word separators (so "Ali Khan-Malik"
+        # splits into two names) — running an address like
+        # "ali-khan@company.com" through that turns it into "ali khan@company
+        # com" and it would never match the real row again.
+        exact_email = db.scalar(select(User).where(User.email.ilike(name.strip())))
+        if exact_email:
+            return exact_email
+
     normalized = normalize_person_name(name)
     if not normalized:
         return None

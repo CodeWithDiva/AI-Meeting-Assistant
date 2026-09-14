@@ -48,6 +48,10 @@ const PATHS: Record<string, string[]> = {
   external: ["M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6", "M15 3h6v6", "M10 14 21 3"],
   shield: ["M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"],
   more: ["M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z", "M19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z", "M5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"],
+  briefcase: ["M3 7h18v13H3z", "M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2", "M3 13h18"],
+  target: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z", "M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z", "M12 12a0.5 0.5 0 1 0 0-1 0.5 0.5 0 0 0 0 1Z"],
+  activity: ["M22 12h-4l-3 9L9 3l-3 9H2"],
+  logo: ["M4 12v-2", "M8 15V9", "M12 18V6", "M16 15V9", "M20 12v-2"],
 };
 
 export type IconName = keyof typeof PATHS;
