@@ -50,6 +50,10 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)) -> User:
     email = request.email.lower()
     if db.scalar(select(User).where(User.email == email)):
         raise HTTPException(status_code=409, detail="Email is already registered.")
+    # Admin is granted only by explicit action — matching ADMIN_EMAILS in
+    # .env, or an existing admin promoting someone from the Team page. A new
+    # registration is never trusted to grant itself admin access, even when
+    # the workspace currently has no admin at all.
     admin_emails = {
         item.strip().lower()
         for item in os.getenv("ADMIN_EMAILS", "").split(",")

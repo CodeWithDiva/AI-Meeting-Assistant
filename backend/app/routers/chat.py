@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+from datetime import date
 from typing import Any
 
 import httpx
@@ -83,16 +84,24 @@ async def _ask_llm(context_prompt: str, question: str, *, style: str = "spoken")
     )
 
     system_msg = (
-        "You are Alina, an AI meeting assistant. Answer the question "
-        f"accurately, using ONLY the context below. {length_rule}\n"
+        f"You are Alina, an AI meeting assistant. Today is "
+        f"{date.today().strftime('%A, %d %B %Y')}.\n"
+        "If the question is a greeting or ordinary small talk ('hi', 'hello "
+        "alina', 'how are you'), answer it naturally and briefly as "
+        "yourself — don't mention meetings at all. For a general-knowledge "
+        "question unrelated to any meeting (today's date, a definition, "
+        "basic math), just answer it directly. For anything about a "
+        "meeting, a task, a decision, or what's new/pending, answer "
+        f"accurately using ONLY the context below. {length_rule}\n"
         f"{scope_rule}"
         "Reply in the same language the question was asked in (English, Urdu, "
         "or Roman Urdu). When asked who has a task, the owner is the person "
         "the transcript names as doing it — '[Sara]: Ali will send the report' "
-        "means Ali's task, not Sara's. Do not start with your own name. If the "
-        "context does not contain the answer, say so plainly rather than "
-        "guessing or padding — don't invent a meeting, task or decision that "
-        "isn't in the context."
+        "means Ali's task, not Sara's. Do not start with your own name. If a "
+        "meeting-related question has nothing in the context to answer it "
+        "from, say so plainly and suggest what to do next (e.g. add a "
+        "meeting, or run \"Generate notes\") rather than guessing or "
+        "inventing a meeting, task or decision that isn't there."
     )
     full_prompt = f"{system_msg}\n\n{context_prompt}\n\nQuestion: {question}\nAnswer:"
     payload = {
@@ -156,6 +165,25 @@ _FALLBACK_INTENTS: list[tuple[str, tuple[str, ...]]] = [
     ("Summary", ("summary", "about", "overview", "khulasa", "kya baat")),
 ]
 
+_GREETING_WORDS = {
+    "hi", "hii", "hiii", "hello", "helo", "hey", "heya", "salam", "assalam",
+    "assalamualaikum", "aoa",
+}
+_DATE_TOPIC_WORDS = {"date", "aaj", "today"}
+_DATE_QUESTION_WORDS = {"what", "whats", "which", "kya", "kaunsi", "konsi"}
+
+
+def _looks_like_greeting(question: str) -> bool:
+    words = re.findall(r"[a-zA-Z]+", question.casefold())
+    # Short and mostly a greeting word — "hello alina" or "hi", not a real
+    # question that happens to open politely ("hi, what did we decide?").
+    return bool(words) and len(words) <= 3 and any(w in _GREETING_WORDS for w in words)
+
+
+def _looks_like_a_date_question(question: str) -> bool:
+    words = set(re.findall(r"[a-zA-Z]+", question.casefold()))
+    return bool(words & _DATE_TOPIC_WORDS) and bool(words & _DATE_QUESTION_WORDS)
+
 
 def _fallback_answer(context_prompt: str, question: str) -> str:
     """Answer from the context itself when no LLM is reachable.
@@ -165,7 +193,16 @@ def _fallback_answer(context_prompt: str, question: str) -> str:
     matching section from every meeting block — not just whichever meeting's
     lines happened to appear last, which is what a flat key→value scan over
     the whole prompt would silently collapse to.
+
+    A greeting or a bare date question is answered directly — it needs no
+    meeting data at all, so it should not be met with "I don't have enough
+    notes" just because Ollama is unreachable.
     """
+    if _looks_like_greeting(question):
+        return "Hello! I'm Alina. Ask me about your meetings — decisions, tasks, or what's new."
+    if _looks_like_a_date_question(question):
+        return f"Today is {date.today().strftime('%A, %d %B %Y')}."
+
     blocks = re.split(r"(?=^Meeting: )", context_prompt, flags=re.MULTILINE)
     meetings: list[dict[str, str]] = []
     for block in blocks:

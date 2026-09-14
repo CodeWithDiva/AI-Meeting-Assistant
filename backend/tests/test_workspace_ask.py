@@ -92,3 +92,33 @@ def test_analysis_is_told_the_real_registered_names_for_assignment(monkeypatch) 
     assert seen_rosters and employee["full_name"] in seen_rosters[0]
     # Every registered member is offered, not only people the bot saw on the call.
     assert owner["full_name"] in seen_rosters[0]
+
+
+def test_a_greeting_and_a_meeting_question_get_different_context_with_no_meetings(monkeypatch) -> None:
+    """The bug this guards against: every question — "helo alina", "what is
+    date", "whats the update of metting" — was met with the exact same
+    "there aren't any meetings" line, because that answer was hard-coded
+    before the LLM was ever asked anything. Now every question reaches
+    _ask_llm, which is what actually tells a greeting from a real question.
+    """
+    _, headers = _register("Kamran")
+
+    seen_context: list[str] = []
+
+    async def fake_ask_llm(context_prompt: str, question: str, *, style: str = "spoken") -> str:
+        seen_context.append(context_prompt)
+        return f"stub answer for: {question}"
+
+    monkeypatch.setattr("app.routers.workspace._ask_llm", fake_ask_llm)
+
+    greeting = client.post("/api/workspace/ask", json={"question": "helo alina"}, headers=headers)
+    question = client.post("/api/workspace/ask", json={"question": "what's still open?"}, headers=headers)
+
+    assert greeting.status_code == 200 and question.status_code == 200
+    # Both reach the LLM (not a hard-coded bail-out)...
+    assert greeting.json()["answer"] == "stub answer for: helo alina"
+    assert question.json()["answer"] == "stub answer for: what's still open?"
+    # ...with the same honest "no meetings" context either way — it's up to
+    # the model (now a real one, not a canned string) to tell a greeting
+    # apart from a real question about meeting data.
+    assert seen_context[0] == seen_context[1] == "This workspace has no meetings recorded yet."

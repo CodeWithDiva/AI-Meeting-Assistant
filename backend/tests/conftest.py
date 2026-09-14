@@ -22,4 +22,26 @@ import os
 from pathlib import Path
 
 _TEST_DB = Path(__file__).resolve().parent / "test_meeting_assistant.db"
+
+# Start every test session from a clean, empty database. Nothing has
+# imported `app` yet at this point, so nothing holds this file open. Without
+# this, fixtures using a plain descriptive name ("Someone Nobody Knows",
+# "Sara" a raw email's local part resolves to) can collide with a
+# same-named user a previous run left behind and never cleaned up, which is
+# exactly the kind of flaky, order-dependent failure a test database exists
+# to prevent.
+if _TEST_DB.exists():
+    _TEST_DB.unlink()
+
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TEST_DB.as_posix()}")
+
+# Create the schema now, rather than relying on `app.main` being imported
+# first. Only test files that exercise the HTTP layer import `app.main` (the
+# module that normally calls `Base.metadata.create_all`); plenty of others
+# (test_action_items.py among them) talk to the ORM directly and would
+# otherwise hit "no such table" the moment this file starts empty instead of
+# already carrying tables over from a previous run.
+import app.models  # noqa: E402,F401  (registers every model on Base before create_all)
+from app.database import Base, engine  # noqa: E402
+
+Base.metadata.create_all(bind=engine)

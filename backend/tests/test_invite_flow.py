@@ -122,3 +122,25 @@ def test_admin_can_remove_an_invited_or_active_member_but_not_themselves() -> No
     assert client.delete(f"/api/auth/admin/users/{user_id}", headers=admin_headers).status_code == 204
     listing = client.get("/api/auth/admin/users", headers=admin_headers).json()
     assert all(r["id"] != user_id for r in listing)
+
+
+def test_registering_never_grants_admin_on_its_own_even_with_no_admin_in_the_workspace() -> None:
+    """Admin access is only ever explicit — ADMIN_EMAILS, or an existing
+    admin promoting someone. A fresh signup must never self-grant it, even
+    when the workspace currently has no admin at all — that would let
+    whoever registers next (not necessarily the person who meant to) take
+    over the workspace.
+    """
+    with SessionLocal() as db:
+        for user in db.query(User).filter(User.role == "admin").all():
+            user.role = "employee"
+        db.commit()
+        assert db.query(User).filter(User.role == "admin").count() == 0
+
+    tag = uuid.uuid4().hex[:8]
+    res = client.post(
+        "/api/auth/register",
+        json={"email": f"nobody-special-{tag}@example.com", "password": "password123", "full_name": "Nobody Special"},
+    )
+    assert res.status_code == 201
+    assert res.json()["role"] == "employee"

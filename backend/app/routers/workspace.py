@@ -177,13 +177,6 @@ async def ask_workspace(
     ))
     meeting_ids = list(dict.fromkeys(matched_ids + recent_ids))[:8]
 
-    if not meeting_ids:
-        return WorkspaceAnswer(
-            question=request.question,
-            answer="There aren't any meetings in the workspace yet to answer that from.",
-            sources=[],
-        )
-
     meetings = list(
         db.scalars(
             select(Meeting)
@@ -195,7 +188,7 @@ async def ask_workspace(
             .where(Meeting.id.in_(meeting_ids))
             .order_by(Meeting.created_at.desc())
         )
-    )
+    ) if meeting_ids else []
 
     context_blocks = []
     sources = []
@@ -218,14 +211,19 @@ async def ask_workspace(
             context_blocks.append("\n".join(lines))
             sources.append({"meeting_id": meeting.id, "title": meeting.title})
 
-    if not context_blocks:
-        return WorkspaceAnswer(
-            question=request.question,
-            answer="Those meetings don't have notes yet — run \"Generate notes\" on them first.",
-            sources=[],
-        )
+    # Deliberately never a hard "no meetings" bail-out here: a plain "helo
+    # alina" or "what's today's date" is not a meeting question at all, and
+    # an assistant that only ever replies "no meetings yet" to everything
+    # looks broken rather than merely light on data. The LLM still gets told
+    # the truth about what's on record, so it can answer normally while being
+    # honest when a question genuinely needs meeting data that isn't there.
+    if context_blocks:
+        context = "\n\n".join(context_blocks)
+    elif meetings:
+        context = "No meeting in the workspace has notes yet (run \"Generate notes\" on one first)."
+    else:
+        context = "This workspace has no meetings recorded yet."
 
-    context = "\n\n".join(context_blocks)
     answer = await _ask_llm(context, request.question, style="written")
     return WorkspaceAnswer(question=request.question, answer=answer, sources=sources)
 

@@ -53,3 +53,18 @@ def test_a_decision_question_over_several_meetings_only_cites_the_one_with_a_dec
     answer = _fallback_answer(MULTI_MEETING_CONTEXT, "What did we decide?")
     assert "Cap marketing spend at 50000 for Q1" in answer
     assert "Migrate the database" not in answer
+
+
+# ── Greetings and general questions need no meeting data at all ──────────
+
+
+def test_a_greeting_is_answered_directly_even_with_no_meetings() -> None:
+    answer = _fallback_answer("This workspace has no meetings recorded yet.", "helo alina")
+    assert "don't have enough" not in answer.lower()
+    assert "alina" in answer.lower()
+
+
+def test_a_bare_date_question_is_answered_without_needing_any_meeting() -> None:
+    from datetime import date as _date
+    answer = _fallback_answer("This workspace has no meetings recorded yet.", "what is the date")
+    assert str(_date.today().year) in answer
