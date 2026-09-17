@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.auth import get_current_user
@@ -139,6 +139,36 @@ def _keywords(question: str) -> list[str]:
     return [w for w in words if w not in _STOPWORDS][:6]
 
 
+def _workspace_stats(user: User, db: Session) -> str:
+    """Basic counts about the workspace itself — team size, meetings, tasks.
+
+    Not meeting content — this is what lets Alina answer a question like
+    "how many employees are on the dashboard" correctly instead of treating
+    it as a meeting question with nothing to go on.
+    """
+    total_members = db.scalar(select(func.count(User.id))) or 0
+    admins = db.scalar(select(func.count(User.id)).where(User.role == "admin")) or 0
+
+    scope = _meeting_scope(user)
+    total_meetings = db.scalar(select(func.count(Meeting.id)).where(scope)) or 0
+    open_tasks = db.scalar(
+        select(func.count(ActionItem.id))
+        .join(Meeting, ActionItem.meeting_id == Meeting.id)
+        .where(scope, ActionItem.status != "done")
+    ) or 0
+
+    employees = total_members - admins
+    # The exact phrasing matters more than it should on a 7B model: leading
+    # with "team" then the plainest number first ("2 employees, 1 admin")
+    # measurably got consistently correct answers where "3 total (1 admin, 2
+    # employee)" sometimes had the model answer "0" to "how many employees".
+    return (
+        f"Workspace team: {employees} employee(s), {admins} admin(s) "
+        f"({total_members} member(s) total). Meetings recorded: {total_meetings}. "
+        f"Open tasks: {open_tasks}."
+    )
+
+
 @router.post("/api/workspace/ask", response_model=WorkspaceAnswer)
 async def ask_workspace(
     request: WorkspaceQuestion,
@@ -218,11 +248,20 @@ async def ask_workspace(
     # the truth about what's on record, so it can answer normally while being
     # honest when a question genuinely needs meeting data that isn't there.
     if context_blocks:
-        context = "\n\n".join(context_blocks)
+        meeting_context = "\n\n".join(context_blocks)
     elif meetings:
-        context = "No meeting in the workspace has notes yet (run \"Generate notes\" on one first)."
+        meeting_context = "No meeting in the workspace has notes yet (run \"Generate notes\" on one first)."
     else:
-        context = "This workspace has no meetings recorded yet."
+        meeting_context = "This workspace has no meetings recorded yet."
+
+    # "How many employees are on the dashboard?" is a real, answerable
+    # question — just not from meeting notes. Without this, every such
+    # workspace-metadata question got the same wrong "no information in the
+    # meeting context" answer, because meeting notes were the only context
+    # Alina ever saw. Team size is visible to any signed-in member already
+    # (the assignee picker on every task form), so it costs nothing to state
+    # plainly here too.
+    context = f"{_workspace_stats(user, db)}\n\n{meeting_context}"
 
     answer = await _ask_llm(context, request.question, style="written")
     return WorkspaceAnswer(question=request.question, answer=answer, sources=sources)

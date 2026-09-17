@@ -141,41 +141,152 @@ class GoogleMeetJoinStrategy:
 
         await click_if_visible(page, r"accept all|i agree|got it|dismiss", 5_000)
 
-        await self._disable_devices(page)
+        # A monitored, screenshot-every-few-seconds run of the real join flow
+        # caught Meet's "Do you want people to see you in the meeting?"
+        # dialog reappearing repeatedly through the whole pre-join sequence —
+        # checking it at a few fixed points (before typing the name, before
+        # clicking join, ...) kept missing whichever reappearance happened
+        # between those checks, and a dialog still open when the page moves
+        # on to actually joining the call is what left the browser on a
+        # blank page afterwards. A background task that watches for it
+        # continuously, for as long as we're still on the pre-join screen,
+        # is the only thing that reliably catches every reappearance.
+        watcher = asyncio.create_task(self._camera_prompt_watcher(page))
+        try:
+            await self._disable_devices(page)
 
-        name_field = await find_first_visible(
-            page,
-            [
-                page.get_by_placeholder(re.compile("your name", re.I)),
-                page.get_by_label(re.compile("your name", re.I)),
-                page.locator("input[aria-label*='name' i]"),
-                page.locator("input[type='text']"),
-            ],
-            timeout_ms=self.ui_timeout_ms,
-        )
-        if name_field:
-            await _type_name(name_field, display_name)
-            await asyncio.sleep(random.uniform(0.4, 0.9))
-        else:
-            # A signed-in Chromium profile skips the name prompt entirely.
-            logger.info("No guest name field on Meet — continuing with the profile's name.")
+            name_field = await find_first_visible(
+                page,
+                [
+                    page.get_by_placeholder(re.compile("your name", re.I)),
+                    page.get_by_label(re.compile("your name", re.I)),
+                    page.locator("input[aria-label*='name' i]"),
+                    page.locator("input[type='text']"),
+                ],
+                timeout_ms=self.ui_timeout_ms,
+            )
+            if name_field:
+                await _type_name(name_field, display_name)
+                await asyncio.sleep(random.uniform(0.4, 0.9))
+            else:
+                # A signed-in Chromium profile skips the name prompt entirely.
+                logger.info("No guest name field on Meet — continuing with the profile's name.")
 
-        join_btn = await find_first_visible(
-            page,
-            [
-                page.get_by_role(
-                    "button", name=re.compile(r"ask to join|join now|join anyway|join here too", re.I)
-                ),
-                page.get_by_text(re.compile(r"^(ask to join|join now|join anyway)$", re.I)),
-            ],
-            timeout_ms=self.ui_timeout_ms,
-        )
-        if not join_btn:
-            raise JoinFailedError(await self._diagnose(page))
-        await join_btn.click()
-        logger.info("Google Meet: asked to join as %r.", display_name)
+            join_btn = await find_first_visible(
+                page,
+                [
+                    page.get_by_role(
+                        "button", name=re.compile(r"ask to join|join now|join anyway|join here too", re.I)
+                    ),
+                    page.get_by_text(re.compile(r"^(ask to join|join now|join anyway)$", re.I)),
+                ],
+                timeout_ms=self.ui_timeout_ms,
+            )
+            if not join_btn:
+                raise JoinFailedError(await self._diagnose(page))
+            try:
+                await join_btn.click(timeout=10_000)
+            except Exception:
+                # Last resort: something is still overlapping the button
+                # visually even though it exists — force through the overlay
+                # rather than let 30s tick away on an actionability wait for
+                # a dialog the watcher task should already be closing.
+                logger.info("Google Meet: normal click on 'Ask to join' was blocked — forcing it.")
+                await join_btn.click(force=True, timeout=5_000)
+            logger.info("Google Meet: asked to join as %r.", display_name)
+        finally:
+            watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
 
         await self._wait_for_admission(page)
+
+    async def _camera_prompt_watcher(self, page: Any) -> None:
+        """Background loop: close the camera/mic dialog every time it shows up.
+
+        Runs for the whole pre-join sequence in `join`, not just at a few
+        fixed checkpoints — see the comment in `join` for why that mattered.
+        """
+        while True:
+            try:
+                await self._dismiss_camera_prompt(page)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Google Meet: camera-prompt watcher pass failed", exc_info=True)
+            await asyncio.sleep(0.6)
+
+    async def _dismiss_camera_prompt(self, page: Any) -> None:
+        """Close Meet's "Do you want people to see you in the meeting?" dialog.
+
+        This only appears on a browser profile with no saved camera/mic
+        preference yet (a fresh `.bot-profile`, or the first join ever) — a
+        separate modal that sits on top of everything else, not the usual
+        pre-join tile toggles `_disable_devices` handles.
+
+        A monitored run of the real join flow (screenshots every few
+        seconds) caught this dialog still sitting there, unclosed, minutes
+        into the join — every close-button/Escape strategy tried here
+        previously simply didn't work, and a stuck dialog left open while
+        the page moves on to actually joining the call is what was leaving
+        the browser on a broken blank page afterwards. "Camera allowed" is a
+        real button confirmed to render correctly, so it leads now instead
+        of being a last resort — the goal is getting the dialog gone and
+        *confirmed* gone, not closing it tidily. The Ctrl+E shortcut in
+        _disable_devices right after this call turns the camera off again.
+        """
+        text_pattern = re.compile(r"do you want people to see you", re.I)
+        for attempt in range(3):
+            try:
+                if await find_first_visible(
+                    page, [page.get_by_text(text_pattern)], timeout_ms=2_000, poll_ms=250
+                ) is None:
+                    return  # gone (or never appeared)
+
+                accept_btn = await find_first_visible(
+                    page,
+                    [
+                        page.get_by_role("button", name=re.compile(r"^camera allowed$", re.I)),
+                        page.get_by_role("button", name=re.compile(r"camera and microphone allowed", re.I)),
+                    ],
+                    timeout_ms=1_500,
+                    poll_ms=250,
+                )
+                if accept_btn:
+                    await accept_btn.click(force=True, timeout=3_000)
+                else:
+                    # The buttons themselves weren't found this pass — try the
+                    # close icon, then Escape, as fallbacks for this attempt.
+                    close_btn = await find_first_visible(
+                        page,
+                        [
+                            page.locator("[aria-label='Close dialog' i]"),
+                            page.get_by_role("button", name=re.compile(r"close", re.I)),
+                        ],
+                        timeout_ms=1_000,
+                        poll_ms=250,
+                    )
+                    if close_btn:
+                        await close_btn.click(force=True, timeout=2_000)
+                    else:
+                        await page.keyboard.press("Escape")
+
+                # Verify — don't just assume the click landed.
+                await asyncio.sleep(0.5)
+                if await find_first_visible(
+                    page, [page.get_by_text(text_pattern)], timeout_ms=1_000, poll_ms=250
+                ) is None:
+                    logger.info("Google Meet: dismissed the camera/mic preview prompt (attempt %d).", attempt + 1)
+                    return
+            except Exception:
+                logger.debug("Google Meet: dismiss-camera-prompt attempt %d failed", attempt + 1, exc_info=True)
+
+        logger.warning(
+            "Google Meet: the camera/mic preview prompt would not close after 3 attempts — "
+            "continuing anyway, but it may still be covering the join button."
+        )
 
     async def _disable_devices(self, page: Any) -> None:
         """Turn the camera (and, without a virtual mic, the microphone) off.

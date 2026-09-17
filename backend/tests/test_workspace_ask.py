@@ -118,7 +118,24 @@ def test_a_greeting_and_a_meeting_question_get_different_context_with_no_meeting
     # Both reach the LLM (not a hard-coded bail-out)...
     assert greeting.json()["answer"] == "stub answer for: helo alina"
     assert question.json()["answer"] == "stub answer for: what's still open?"
-    # ...with the same honest "no meetings" context either way — it's up to
-    # the model (now a real one, not a canned string) to tell a greeting
-    # apart from a real question about meeting data.
-    assert seen_context[0] == seen_context[1] == "This workspace has no meetings recorded yet."
+    # ...with the same honest context either way — it's up to the model (now
+    # a real one, not a canned string) to tell a greeting apart from a real
+    # question about meeting data.
+    assert seen_context[0] == seen_context[1]
+    assert seen_context[0].endswith("This workspace has no meetings recorded yet.")
+
+
+def test_a_workspace_question_gets_team_size_not_a_meeting_shaped_answer() -> None:
+    """The other bug this guards against: "how many employees are on the
+    dashboard" was answered as if it were a meeting question ("there is no
+    information about employees in the meeting notes"), because team size
+    was never part of what Alina could see — only meeting notes were.
+    """
+    _, headers = _register("Kamran")
+    res = client.post(
+        "/api/workspace/ask", json={"question": "how many employees are on the dashboard"}, headers=headers
+    )
+    assert res.status_code == 200
+    answer = res.json()["answer"].lower()
+    assert "employee" in answer
+    assert "no information" not in answer and "don't have" not in answer

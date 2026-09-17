@@ -315,8 +315,11 @@ class BrowserMeetingBot:
         "--use-fake-ui-for-media-stream",       # auto-accept mic/cam prompt, real devices
         "--disable-blink-features=AutomationControlled",
         "--disable-infobars",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
+        # --no-sandbox deliberately NOT here: it's meant for running Chrome as
+        # root in a container, not a normal Windows desktop session — it
+        # triggers Chrome's own "Stability and security will suffer" banner
+        # and was implicated in the black-window rendering bug below, on top
+        # of being an unnecessary privilege reduction on this machine.
         "--start-maximized",
         "--no-first-run",
         "--no-default-browser-check",
@@ -339,6 +342,24 @@ class BrowserMeetingBot:
         "--disable-backgrounding-occluded-windows",
         "--disable-renderer-backgrounding",
         "--disable-background-timer-throttling",
+        # --enable-gpu-rasterization / --disable-gpu-sandbox were tried here
+        # and turned out to be exactly the same class of problem as
+        # --no-sandbox: Chrome flags them as "unsupported", banner and all,
+        # which is one more thing sitting on top of the page fighting for
+        # attention with whatever Meet/Zoom is trying to show. Left out.
+        #
+        # --disable-gpu / --use-gl=swiftshader were also tried, on the theory
+        # that the black pre-join screen was a GPU driver rendering failure.
+        # A monitored, screenshot-every-few-seconds run of the real join flow
+        # showed what that actually did: the pre-join form rendered, "Join
+        # now" got clicked correctly, and then the page went to a genuinely
+        # *empty* document.body — not black, not slow, empty — for the rest
+        # of the run. Google Meet's in-call view is WebGL/canvas-heavy for
+        # its video grid, and forcing software rendering (SwiftShader) broke
+        # that transition outright, which is worse than the cosmetic black
+        # pre-join screen it was meant to fix. Left out; the occlusion-fix
+        # feature flag above plus bring_to_front() (see _launch_browser) are
+        # the actual fix for the black-window symptom.
     ]
 
     # Injected before any page script runs. Meeting clients (Zoom especially)
@@ -361,7 +382,16 @@ class BrowserMeetingBot:
         Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
         Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
         Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-        const origQuery = window.navigator.permissions.query;
+        // Confirmed the actual cause of the blank-page-after-joining bug via
+        // a page.on("pageerror") capture: "Failed to execute 'query' on
+        // 'Permissions': Illegal invocation". `query` is a native method —
+        // detaching it from `navigator.permissions` (as a bare function
+        // reference) and calling it without that object as `this` throws
+        // exactly this error. Meet calls permissions.query() to check
+        // camera/mic state right as it transitions into the call, so this
+        // was breaking Meet's own initialization at exactly that moment —
+        // .call()ing it back onto the real permissions object is the fix.
+        const origQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
         window.navigator.permissions.query = (p) => (
             p && p.name === 'notifications'
                 ? Promise.resolve({ state: Notification.permission })
@@ -403,6 +433,15 @@ class BrowserMeetingBot:
 
         pages = self._context.pages
         self._page = pages[0] if pages else await self._context.new_page()
+        if not BOT_HEADLESS:
+            try:
+                # Explicitly raises/focuses the tab. Windows can still treat
+                # an unfocused automation window as occluded — and paint it
+                # solid black — even with the feature flags above; this is
+                # the other half of that fix.
+                await self._page.bring_to_front()
+            except Exception:
+                logger.debug("bring_to_front failed", exc_info=True)
         await self._page.add_init_script(self._STEALTH_SCRIPT)
         if BOT_VIRTUAL_MIC_LABEL:
             await self._page.add_init_script(

@@ -203,6 +203,18 @@ def _fallback_answer(context_prompt: str, question: str) -> str:
     if _looks_like_a_date_question(question):
         return f"Today is {date.today().strftime('%A, %d %B %Y')}."
 
+    # "How many employees/members are there?" — workspace metadata, not a
+    # meeting question. The workspace-wide ask panel prepends a "Workspace
+    # team: ..." line with these counts; answer straight from it rather than
+    # treating this as a meeting question with nothing to go on.
+    workspace_line = next(
+        (line for line in context_prompt.splitlines() if line.startswith("Workspace team: ")), None
+    )
+    if workspace_line and {"employee", "member", "team", "admin", "workspace"} & set(
+        re.findall(r"[a-zA-Z]+", question.casefold())
+    ):
+        return workspace_line
+
     blocks = re.split(r"(?=^Meeting: )", context_prompt, flags=re.MULTILINE)
     meetings: list[dict[str, str]] = []
     for block in blocks:
