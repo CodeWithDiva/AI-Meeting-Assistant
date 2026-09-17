@@ -1,5 +1,6 @@
 """Interactive AI Chat / Q&A Copilot for meetings."""
 
+import json
 import logging
 import os
 import re
@@ -41,8 +42,11 @@ def _owned_meeting(meeting_id: int, user: User, db: Session) -> Meeting:
     return meeting
 
 
-async def _ask_llm(context_prompt: str, question: str, *, style: str = "spoken") -> str:
-    """Ask Ollama with grounded context, falling back to a context-derived answer.
+def _build_llm_request(
+    context_prompt: str, question: str, *, style: str, stream: bool, temperature: float = 0.2
+) -> tuple[str, dict]:
+    """Build the Ollama `/api/generate` request shared by the streaming and
+    non-streaming ask paths.
 
     `style` controls how much room the answer gets:
     * "spoken"  — a live wake-word reply that gets synthesized and played into
@@ -83,36 +87,71 @@ async def _ask_llm(context_prompt: str, question: str, *, style: str = "spoken")
         if multi_meeting else ""
     )
 
-    system_msg = (
-        f"You are Alina, an AI meeting assistant. Today is "
-        f"{date.today().strftime('%A, %d %B %Y')}.\n"
-        "If the question is a greeting or ordinary small talk ('hi', 'hello "
-        "alina', 'how are you'), answer it naturally and briefly as "
-        "yourself — don't mention meetings at all. For a general-knowledge "
-        "question unrelated to any meeting (today's date, a definition, "
-        "basic math), just answer it directly. For anything about a "
-        "meeting, a task, a decision, or what's new/pending, answer "
-        f"accurately using ONLY the context below. {length_rule}\n"
-        f"{scope_rule}"
-        "Reply in the same language the question was asked in (English, Urdu, "
-        "or Roman Urdu). When asked who has a task, the owner is the person "
-        "the transcript names as doing it — '[Sara]: Ali will send the report' "
-        "means Ali's task, not Sara's. Do not start with your own name. If a "
-        "meeting-related question has nothing in the context to answer it "
-        "from, say so plainly and suggest what to do next (e.g. add a "
-        "meeting, or run \"Generate notes\") rather than guessing or "
-        "inventing a meeting, task or decision that isn't there."
+    # Leads with the language rule, deliberately blunt about it: Qwen models
+    # in particular sometimes drift into Chinese mid-answer on a Roman Urdu
+    # or Urdu question (seen live — an English/Roman Urdu question answered
+    # entirely in Chinese) even though nothing else in the prompt is remotely
+    # Chinese. Naming the failure mode explicitly and repeating the rule
+    # again right before "Answer:" (recency matters for instruction-following
+    # on a smaller model) measurably stops it.
+    language_rule = (
+        "Reply ONLY in the language the question itself was written in — "
+        "English stays English, Urdu script stays Urdu script, Roman Urdu "
+        "(Urdu written in Latin letters, e.g. 'kya tasks pending hain') gets "
+        "Roman Urdu back. Never answer in Chinese or any other language "
+        "under any circumstances, even if the workspace data or your own "
+        "phrasing tempts you toward it."
     )
-    full_prompt = f"{system_msg}\n\n{context_prompt}\n\nQuestion: {question}\nAnswer:"
+
+    system_msg = (
+        f"You are Alina, an AI assistant who happens to live inside a "
+        f"meeting app. Today is {date.today().strftime('%A, %d %B %Y')}.\n"
+        f"{language_rule}\n"
+        "Answer WHATEVER you're asked, not just meeting topics. A greeting "
+        "or small talk ('hi', 'hello alina', 'how are you') gets a natural, "
+        "brief, personal reply — don't mention meetings at all. A "
+        "general-knowledge, casual, or off-topic question (advice, a joke, "
+        "a definition, basic math, anything not about this workspace) gets "
+        "answered directly and normally from your own knowledge, exactly "
+        "like any other AI assistant would — never refuse it and never say "
+        "you only handle meetings. Only when the question is specifically "
+        "about a meeting, a task, a decision, or what's new/pending should "
+        f"you answer using ONLY the context below. {length_rule}\n"
+        f"{scope_rule}"
+        "Roman Urdu questions are often typed fast on a phone and routinely "
+        "misspelled or phonetic ('taska' for 'task', 'howy' for 'hue', 'ssig' "
+        "for 'assign') — read past that for the intended words and answer in "
+        "clear, correctly-spelled language; never copy a misspelling from "
+        "the question back into your answer. When asked who has a task, the "
+        "owner is the person the transcript names as doing it — '[Sara]: Ali "
+        "will send the report' means Ali's task, not Sara's. Do not start "
+        "with your own name. If a meeting-related question has nothing in "
+        "the context to answer it from, say so plainly and suggest what to "
+        "do next (e.g. add a meeting, or run \"Generate notes\") rather than "
+        "guessing or inventing a meeting, task or decision that isn't there."
+    )
+    full_prompt = (
+        f"{system_msg}\n\n{context_prompt}\n\nQuestion: {question}\n"
+        f"({language_rule})\nAnswer:"
+    )
     payload = {
         "model": model,
         "prompt": full_prompt,
-        "stream": False,
+        "stream": stream,
         # Low temperature keeps answers to what the context says, not the
-        # model's imagination. The token cap bounds latency on a slow CPU;
-        # "written" answers get more room since they may need to list several
-        # items rather than name just one.
-        "options": {"temperature": 0.2, "num_predict": 160 if style == "spoken" else 450},
+        # model's imagination. The token cap bounds latency on a slow CPU —
+        # measured at roughly 2 tokens/sec on this 2-core machine, so a
+        # rambling answer that actually reaches an old cap of 450 tokens took
+        # 3+ minutes. "written" answers still get more room than "spoken"
+        # since they may need to list several items, but both caps are now
+        # small enough to keep the worst case well under a minute of
+        # generation time; length_rule above already asks for brevity so
+        # ordinary answers stop long before hitting either cap.
+        "options": {
+            "temperature": temperature,
+            "num_predict": 90 if style == "spoken" else 220,
+            "num_thread": os.cpu_count() or 4,
+        },
         # Ollama's default is to unload a model 5 minutes after its last use.
         # Measured on a weak 2-core CPU: ~75s to load qwen2.5:7b cold vs. ~7s
         # once warm — reloading between two questions in the same meeting is
@@ -121,6 +160,39 @@ async def _ask_llm(context_prompt: str, question: str, *, style: str = "spoken")
         # normal meeting instead.
         "keep_alive": "30m",
     }
+    return base_url, payload
+
+
+# CJK Unified Ideographs — if a meaningful chunk of the answer is written in
+# Chinese characters, the model ignored the language rule (seen live: an
+# English/Roman Urdu question answered entirely in Chinese). None of this
+# app's supported languages (English, Urdu, Roman Urdu) use this script, so
+# any real presence of it means the answer is simply wrong, not a borderline
+# case worth keeping.
+_CJK_RE = re.compile(r"[一-鿿]")
+
+
+def _is_wrong_script(text: str, question: str = "") -> bool:
+    """True only for Chinese output — a hard, unambiguous mistake.
+
+    A Roman Urdu question sometimes gets answered in Urdu script instead —
+    still linguistically correct, just not the script that was typed. That
+    turned out too soft a signal to retry on: on a hard, heavily-misspelled
+    question it kept losing both the original attempt and the retry to the
+    same drift, which meant giving up to the generic English fallback more
+    often than not — a worse outcome than just keeping the Urdu-script
+    answer. Chinese has no such tradeoff: it's never correct here, and rare
+    enough that retrying it is a clean win.
+    """
+    if not text:
+        return False
+    return len(_CJK_RE.findall(text)) > max(3, len(text) // 20)
+
+
+async def _ask_llm(context_prompt: str, question: str, *, style: str = "spoken") -> str:
+    """Ask Ollama with grounded context, falling back to a context-derived answer."""
+    base_url, payload = _build_llm_request(context_prompt, question, style=style, stream=False)
+    model = payload["model"]
 
     try:
         # qwen2.5:7b on a weak 2-core CPU has measured well over 60s for a
@@ -130,29 +202,134 @@ async def _ask_llm(context_prompt: str, question: str, *, style: str = "spoken")
         # (the except below never raises), but a completed LLM answer beats
         # the generic fallback whenever there is time for one.
         async with httpx.AsyncClient(timeout=150) as client:
-            response = await client.post(f"{base_url}/api/generate", json=payload)
-            if response.status_code == 404:
-                # The configured model isn't pulled. Previously this fell
-                # straight through to the canned fallback below, so the
-                # assistant "answered" every question with a stock sentence
-                # even though a perfectly usable model was installed.
-                substitute = _best_available(await _installed_models(client, base_url))
-                if substitute:
-                    logger.warning(
-                        "Ollama model %r is not installed — answering with %r. "
-                        "Run `ollama pull %s` for the intended quality.",
-                        model, substitute, model,
-                    )
-                    payload["model"] = substitute
-                    response = await client.post(f"{base_url}/api/generate", json=payload)
-            response.raise_for_status()
-            answer = response.json().get("response", "").strip()
-            if answer:
-                return answer
+            for attempt in range(2):  # one retry if the model answers in the wrong script
+                if attempt == 1:
+                    # A second attempt at the same low, near-greedy
+                    # temperature tends to reproduce the exact same
+                    # wrong-script answer — seen live, it did. A real
+                    # temperature bump is what actually gets a different
+                    # sample instead of repeating the mistake.
+                    payload["options"]["temperature"] = 0.7
+                response = await client.post(f"{base_url}/api/generate", json=payload)
+                if response.status_code == 404:
+                    # The configured model isn't pulled. Previously this fell
+                    # straight through to the canned fallback below, so the
+                    # assistant "answered" every question with a stock sentence
+                    # even though a perfectly usable model was installed.
+                    substitute = _best_available(await _installed_models(client, base_url))
+                    if substitute:
+                        logger.warning(
+                            "Ollama model %r is not installed — answering with %r. "
+                            "Run `ollama pull %s` for the intended quality.",
+                            model, substitute, model,
+                        )
+                        payload["model"] = substitute
+                        response = await client.post(f"{base_url}/api/generate", json=payload)
+                response.raise_for_status()
+                answer = response.json().get("response", "").strip()
+                if answer and not _is_wrong_script(answer, question):
+                    return answer
+                if answer:
+                    logger.warning("Ollama answered in the wrong script — retrying once: %r", answer[:120])
     except Exception as exc:
         logger.warning("Ollama chat query unavailable: %s. Using contextual fallback.", exc)
 
     return _fallback_answer(context_prompt, question)
+
+
+async def _stream_pieces(client: httpx.AsyncClient, url: str, payload: dict):
+    """Yield each text piece Ollama streams back for one `/api/generate` call."""
+    async with client.stream("POST", url, json=payload) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            if not line:
+                continue
+            chunk = json.loads(line)
+            piece = chunk.get("response", "")
+            if piece:
+                yield piece
+
+
+async def _ask_llm_stream(context_prompt: str, question: str, *, style: str = "written"):
+    """Same as `_ask_llm`, but yields the answer as it's generated.
+
+    A "written" answer routinely takes 20-40+ seconds on this hardware —
+    streaming it word-by-word is the actual fix for "it's slow", since the
+    person reading it sees progress immediately instead of a blank panel for
+    the whole wait. Falls back to `_fallback_answer`, yielded whole, if
+    Ollama can't be reached at all.
+    """
+    base_url, payload = _build_llm_request(context_prompt, question, style=style, stream=True)
+    url = f"{base_url}/api/generate"
+
+    try:
+        async with httpx.AsyncClient(timeout=150) as client:
+            try:
+                pieces = _stream_pieces(client, url, payload)
+                first = await pieces.__anext__()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                # The configured model isn't pulled — same substitution
+                # _ask_llm does, just re-attempted before anything streams.
+                substitute = _best_available(await _installed_models(client, base_url))
+                if not substitute:
+                    raise RuntimeError("no Ollama model available") from exc
+                logger.warning("Ollama model %r is not installed — answering with %r.", payload["model"], substitute)
+                payload["model"] = substitute
+                pieces = _stream_pieces(client, url, payload)
+                first = await pieces.__anext__()
+            except StopAsyncIteration:
+                first = ""
+
+            # Buffer just enough of the start to catch the model drifting
+            # into the wrong script (seen live: Qwen answering an English/
+            # Roman Urdu question entirely in Chinese) before any of it
+            # reaches the person asking.
+            buffered = first
+            async for piece in pieces:
+                buffered += piece
+                if len(buffered) >= 24:
+                    break
+
+            if _is_wrong_script(buffered, question):
+                # A second attempt at the same near-greedy temperature tends
+                # to reproduce the exact same wrong-script answer — a real
+                # temperature bump is what actually gets a different sample.
+                # Stays a single streamed retry (not routed through the
+                # slower `_ask_llm`, which would add its own extra attempt
+                # on top of this one) so a bad first guess doesn't turn one
+                # slow answer into two or three.
+                logger.warning("Ollama streamed the wrong script — retrying once: %r", buffered[:120])
+                retry_base_url, retry_payload = _build_llm_request(
+                    context_prompt, question, style=style, stream=True, temperature=0.7
+                )
+                retry_pieces = _stream_pieces(client, f"{retry_base_url}/api/generate", retry_payload)
+                retry_buffered = ""
+                async for piece in retry_pieces:
+                    retry_buffered += piece
+                    if len(retry_buffered) >= 24:
+                        break
+                if _is_wrong_script(retry_buffered, question):
+                    yield _fallback_answer(context_prompt, question)
+                    return
+                if retry_buffered:
+                    yield retry_buffered
+                    async for piece in retry_pieces:
+                        yield piece
+                    return
+                yield _fallback_answer(context_prompt, question)
+                return
+
+            if buffered:
+                yield buffered
+                async for piece in pieces:
+                    yield piece
+            else:
+                yield _fallback_answer(context_prompt, question)
+    except Exception as exc:
+        logger.warning("Ollama streaming query unavailable: %s. Using contextual fallback.", exc)
+        yield _fallback_answer(context_prompt, question)
 
 
 # A question wants this section if any of its trigger words appear.

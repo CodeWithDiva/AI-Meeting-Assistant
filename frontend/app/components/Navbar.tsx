@@ -15,6 +15,7 @@ export default function Navbar() {
   const [currentUser, setCurrentUser] = useState<{ email: string; full_name?: string | null; role?: string } | null>(null);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [unread, setUnread] = useState(0);
+  const [unreadMessages, setUnreadMessages] = useState(0);
   const [showNotifMenu, setShowNotifMenu] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -29,6 +30,7 @@ export default function Navbar() {
     if (loggedIn) {
       api.getMe().then(setCurrentUser).catch(() => setCurrentUser(null));
       loadNotifications();
+      api.getUnreadMessageCount().then(setUnreadMessages).catch(() => undefined);
     }
   }, [pathname]);
 
@@ -36,6 +38,7 @@ export default function Navbar() {
     if (!isAuth) return;
     const interval = window.setInterval(() => {
       api.getUnreadNotificationCount().then(setUnread).catch(() => undefined);
+      api.getUnreadMessageCount().then(setUnreadMessages).catch(() => undefined);
     }, 20000);
     return () => window.clearInterval(interval);
   }, [isAuth]);
@@ -118,7 +121,7 @@ export default function Navbar() {
     router.push("/login");
   };
 
-  if (pathname === "/login" || pathname === "/accept-invite") {
+  if (pathname === "/login" || pathname === "/accept-invite" || pathname === "/setup") {
     return (
       <header className="navbar">
         <div className="app-container navbar-inner">
@@ -187,6 +190,7 @@ export default function Navbar() {
                 </button>
                 {showSearch && (
                   <div
+                    className="dropdown-pop"
                     style={{
                       position: "absolute", right: 0, top: "calc(100% + 8px)", width: 380,
                       background: "var(--bg-surface)", border: "1px solid var(--border-card)",
@@ -265,11 +269,30 @@ export default function Navbar() {
                 )}
               </div>
 
+              <Link href="/messages" className="icon-btn" title="Messages" style={{ position: "relative" }}>
+                <Icon name="message" size={16} />
+                {unreadMessages > 0 && (
+                  <span
+                    className="notif-badge"
+                    style={{
+                      position: "absolute", top: -4, right: -4,
+                      background: "var(--accent-rose)", color: "var(--text-on-accent)",
+                      fontSize: 10, fontWeight: 700, minWidth: 16, height: 16, borderRadius: 999,
+                      display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px",
+                      border: "2px solid var(--bg-surface)",
+                    }}
+                  >
+                    {unreadMessages > 9 ? "9+" : unreadMessages}
+                  </span>
+                )}
+              </Link>
+
               <div ref={notifRef} style={{ position: "relative" }}>
                 <button type="button" onClick={() => setShowNotifMenu((v) => !v)} className="icon-btn" title="Notifications">
                   <Icon name="bell" size={16} />
                   {unread > 0 && (
                     <span
+                      className="notif-badge"
                       style={{
                         position: "absolute", top: -4, right: -4,
                         background: "var(--accent-rose)", color: "var(--text-on-accent)",
@@ -285,6 +308,7 @@ export default function Navbar() {
 
                 {showNotifMenu && (
                   <div
+                    className="dropdown-pop"
                     style={{
                       position: "absolute", right: 0, top: "calc(100% + 8px)", width: 340,
                       background: "var(--bg-surface)", border: "1px solid var(--border-card)",

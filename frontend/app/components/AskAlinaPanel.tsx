@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import Icon from "./Icon";
 import Waveform from "./Waveform";
@@ -12,6 +12,7 @@ interface Exchange {
   question: string;
   answer: string;
   sources: Array<{ meeting_id: number; title: string }>;
+  streaming?: boolean;
 }
 
 const SUGGESTIONS = [
@@ -26,7 +27,9 @@ const SUGGESTIONS = [
  * dashboards, so a question can be asked from wherever the person is
  * working, not only from inside a specific meeting. Takes typed or spoken
  * questions (the mic button uses the browser's own speech recognition —
- * Chrome/Edge only, hidden elsewhere).
+ * Chrome/Edge only, hidden elsewhere). Answers stream in as they're
+ * generated — a written answer can take 20-40s on modest hardware, and a
+ * blank panel for that whole time reads as broken.
  */
 export default function AskAlinaPanel({ assistantName = "Alina" }: { assistantName?: string }) {
   const [question, setQuestion] = useState("");
@@ -34,6 +37,11 @@ export default function AskAlinaPanel({ assistantName = "Alina" }: { assistantNa
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const { listening, supported: voiceSupported, toggle: toggleVoice } = useVoiceInput((finalText) => ask(finalText));
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [exchanges]);
 
   async function ask(text: string) {
     const q = text.trim();
@@ -41,13 +49,17 @@ export default function AskAlinaPanel({ assistantName = "Alina" }: { assistantNa
     setLoading(true);
     setError("");
     setQuestion("");
+    const id = String(Date.now());
+    setExchanges((prev) => [...prev, { id, question: q, answer: "", sources: [], streaming: true }]);
     try {
-      const result = await api.askWorkspace(q);
-      setExchanges((prev) => [
-        { id: String(Date.now()), question: q, answer: result.answer, sources: result.sources },
-        ...prev,
-      ]);
+      const result = await api.askWorkspaceStream(q, (textSoFar) => {
+        setExchanges((prev) => prev.map((ex) => (ex.id === id ? { ...ex, answer: textSoFar } : ex)));
+      });
+      setExchanges((prev) =>
+        prev.map((ex) => (ex.id === id ? { ...ex, answer: result.answer, sources: result.sources, streaming: false } : ex))
+      );
     } catch (err: any) {
+      setExchanges((prev) => prev.filter((ex) => ex.id !== id));
       setError(err?.message || `${assistantName} couldn't answer that right now.`);
     } finally {
       setLoading(false);
@@ -117,35 +129,68 @@ export default function AskAlinaPanel({ assistantName = "Alina" }: { assistantNa
         </div>
       )}
 
-      {(loading || listening) && (
+      {listening && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 2px", fontSize: 12.5, color: "var(--text-secondary)" }}>
           <Waveform size={16} active />
-          {listening ? "Listening — ask your question…" : "Thinking through your meetings…"}
+          Listening — ask your question…
         </div>
       )}
 
       {exchanges.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight: 320, overflowY: "auto", marginTop: loading || listening ? 0 : 4 }}>
+        <div className="alina-thread" style={{ marginTop: listening ? 0 : 4 }}>
           {exchanges.map((ex) => (
-            <div key={ex.id} style={{ background: "var(--bg-subtle)", borderRadius: "var(--radius-md)", padding: 13, border: "1px solid var(--border-subtle)" }}>
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-primary)", marginBottom: 6, display: "flex", gap: 7 }}>
-                <span style={{ marginTop: 2, flexShrink: 0 }}><Icon name="message" size={13} /></span>
-                {ex.question}
+            <div key={ex.id}>
+              <div className="alina-row alina-row-q">
+                <div className="alina-bubble alina-bubble-q">{ex.question}</div>
               </div>
-              <p style={{ fontSize: 12.5, color: "var(--text-secondary)", lineHeight: 1.6, marginBottom: ex.sources.length ? 8 : 0, whiteSpace: "pre-wrap" }}>{ex.answer}</p>
-              {ex.sources.length > 0 && (
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {ex.sources.map((s) => (
-                    <Link key={s.meeting_id} href={`/meetings/${s.meeting_id}`} className="badge badge-indigo" style={{ cursor: "pointer" }}>
-                      <Icon name="video" size={10} /> {s.title}
-                    </Link>
-                  ))}
+              <div className="alina-row alina-row-a">
+                <span className="alina-avatar"><Waveform size={12} active={!!ex.streaming} /></span>
+                <div className="alina-bubble alina-bubble-a">
+                  {ex.answer || (ex.streaming ? "" : "…")}
+                  {ex.streaming && <span className="alina-cursor" />}
+                  {ex.sources.length > 0 && (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                      {ex.sources.map((s) => (
+                        <Link key={s.meeting_id} href={`/meetings/${s.meeting_id}`} className="badge badge-indigo" style={{ cursor: "pointer" }}>
+                          <Icon name="video" size={10} /> {s.title}
+                        </Link>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
           ))}
+          <div ref={endRef} />
         </div>
       )}
+
+      <style>{`
+        .alina-thread {
+          display: flex; flex-direction: column; gap: 14px;
+          max-height: 340px; overflow-y: auto; padding-right: 2px;
+        }
+        .alina-row { display: flex; margin-bottom: 6px; }
+        .alina-row-q { justify-content: flex-end; }
+        .alina-row-a { justify-content: flex-start; align-items: flex-start; gap: 8px; }
+        .alina-avatar {
+          width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+          background: var(--accent-primary-tint); color: var(--accent-primary);
+          display: flex; align-items: center; justify-content: center; margin-top: 2px;
+        }
+        .alina-bubble {
+          max-width: 82%; padding: 9px 13px; border-radius: var(--radius-md);
+          font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+        }
+        .alina-bubble-q { background: var(--accent-gradient); color: var(--text-on-accent); border-bottom-right-radius: 4px; font-weight: 500; }
+        .alina-bubble-a { background: var(--bg-subtle); border: 1px solid var(--border-subtle); color: var(--text-secondary); border-bottom-left-radius: 4px; }
+        .alina-cursor {
+          display: inline-block; width: 6px; height: 13px; margin-left: 2px;
+          background: var(--accent-primary); vertical-align: text-bottom;
+          animation: alina-blink 0.9s step-end infinite;
+        }
+        @keyframes alina-blink { 50% { opacity: 0; } }
+      `}</style>
     </div>
   );
 }

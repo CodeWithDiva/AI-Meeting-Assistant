@@ -247,12 +247,21 @@ class AvaVoiceAssistant:
                     )
                 )
 
+            # The most recent segments, not the earliest — a live wake-word
+            # question is almost always about what was just said, and a
+            # shorter prompt also means less for the LLM to churn through on
+            # a slow CPU (a spoken reply is the most latency-sensitive answer
+            # this app gives, since the room is waiting on it).
             segments = list(
-                db.scalars(
-                    select(TranscriptSegment)
-                    .where(TranscriptSegment.meeting_id == self.meeting_id)
-                    .order_by(TranscriptSegment.start_time)
-                    .limit(60)
+                reversed(
+                    list(
+                        db.scalars(
+                            select(TranscriptSegment)
+                            .where(TranscriptSegment.meeting_id == self.meeting_id)
+                            .order_by(TranscriptSegment.start_time.desc())
+                            .limit(25)
+                        )
+                    )
                 )
             )
             if segments:

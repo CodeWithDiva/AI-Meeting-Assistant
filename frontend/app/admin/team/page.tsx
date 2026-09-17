@@ -171,6 +171,11 @@ export default function AdminTeamPage() {
                   <td style={{ color: "var(--text-muted)" }}>{formatDate(user.created_at, true)}</td>
                   <td>
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                      {user.id !== currentUserId && user.status !== "invited" && (
+                        <Link href={`/messages?to=${user.id}`} className="icon-btn" style={{ width: 28, height: 28 }} title="Message">
+                          <Icon name="message" size={12} />
+                        </Link>
+                      )}
                       {user.status === "invited" && (
                         <button onClick={() => resendInvite(user)} disabled={busyId === user.id} className="btn btn-ghost btn-sm" title="Resend invite">
                           <Icon name="mail" size={12} />

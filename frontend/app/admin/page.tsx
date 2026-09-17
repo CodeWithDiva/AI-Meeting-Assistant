@@ -91,23 +91,23 @@ export default function AdminHomePage() {
       {success && <div className="alert-box alert-success"><Icon name="check" size={16} />{success}</div>}
 
       <div className="ledger-strip">
-        <div className="ledger-cell">
-          <div className="stat-header"><span className="stat-label">Team</span><Icon name="users" size={14} className="stat-icon" /></div>
+        <div className="ledger-cell ledger-cell-indigo">
+          <div className="stat-header"><span className="stat-label">Team</span><span className="stat-icon-badge"><Icon name="users" size={14} /></span></div>
           <span className="stat-value">{analytics?.totals.members ?? "—"}</span>
           <div className="stat-subtext">registered members</div>
         </div>
-        <div className="ledger-cell">
-          <div className="stat-header"><span className="stat-label">Meetings</span><Icon name="video" size={14} className="stat-icon" /></div>
+        <div className="ledger-cell ledger-cell-cyan">
+          <div className="stat-header"><span className="stat-label">Meetings</span><span className="stat-icon-badge"><Icon name="video" size={14} /></span></div>
           <span className="stat-value">{meetings.length}</span>
           <div className="stat-subtext">{analytics?.totals.meetings_this_week ?? 0} this week</div>
         </div>
-        <div className="ledger-cell">
-          <div className="stat-header"><span className="stat-label">Open tasks</span><Icon name="checkSquare" size={14} className="stat-icon" /></div>
+        <div className="ledger-cell ledger-cell-amber">
+          <div className="stat-header"><span className="stat-label">Open tasks</span><span className="stat-icon-badge"><Icon name="checkSquare" size={14} /></span></div>
           <span className="stat-value">{openTasks.length}</span>
           <div className="stat-subtext">{analytics?.totals.unassigned_open_tasks ?? 0} unassigned</div>
         </div>
-        <div className="ledger-cell">
-          <div className="stat-header"><span className="stat-label">Overdue</span><Icon name="clock" size={14} className="stat-icon" /></div>
+        <div className="ledger-cell ledger-cell-rose">
+          <div className="stat-header"><span className="stat-label">Overdue</span><span className="stat-icon-badge"><Icon name="clock" size={14} /></span></div>
           <span className="stat-value" style={{ color: (analytics?.totals.overdue_tasks ?? 0) > 0 ? "var(--accent-rose)" : undefined }}>{analytics?.totals.overdue_tasks ?? 0}</span>
           <div className="stat-subtext">need chasing</div>
         </div>

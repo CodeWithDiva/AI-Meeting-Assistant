@@ -118,6 +118,13 @@ class StickyLanguage:
     into `en` (or vice versa).
     """
 
+    # Whisper's language-ID routinely mistakes Urdu for Hindi — spoken
+    # Hindustani sounds the same either way, and only the script differs.
+    # This app never wants Hindi output, so a "hi" detection gets treated as
+    # the Urdu it almost certainly is, before it can lock the rest of the
+    # meeting into transcribing in Devanagari.
+    _ALIASES = {"hi": "ur"}
+
     def __init__(self, forced: str | None = None, confidence: float = 0.65) -> None:
         self.forced = forced
         self.confidence = confidence
@@ -130,6 +137,7 @@ class StickyLanguage:
     def observe(self, detected: str | None, probability: float) -> None:
         if self.forced or self.locked or not detected:
             return
+        detected = self._ALIASES.get(detected, detected)
         if probability >= self.confidence:
             self.locked = detected
             logger.info(

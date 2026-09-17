@@ -45,6 +45,45 @@ def _invite_link(token: str) -> str:
     return f"{base}/accept-invite?token={token}"
 
 
+@router.get("/setup-status")
+def setup_status(db: Session = Depends(get_db)) -> dict[str, bool]:
+    """True on a brand-new install — the users table is completely empty.
+
+    Distinct from "zero admins": a workspace that already has employees but
+    lost its admins must never let a stranger register their way into admin
+    (see `register` below). This only ever fires once, on the very first
+    screen a fresh deployment shows, before anyone at all has an account.
+    """
+    has_any_user = db.scalar(select(User.id).limit(1)) is not None
+    return {"needs_setup": not has_any_user}
+
+
+@router.post("/setup", response_model=TokenResponse, status_code=201)
+def setup_first_admin(request: RegisterRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    """Create the very first account — as admin — on a brand-new install.
+
+    Only works while the users table is empty. Once this workspace has an
+    owner, every later account goes through the normal `register`
+    (employee-by-default) or invite flow; this endpoint then refuses
+    permanently, so it can never be replayed to mint a second free admin.
+    """
+    if db.scalar(select(User.id).limit(1)) is not None:
+        raise HTTPException(status_code=409, detail="This workspace is already set up.")
+
+    user = User(
+        email=request.email.lower(),
+        password_hash=hash_password(request.password),
+        full_name=(request.full_name or "").strip() or None,
+        role="admin",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    token = create_access_token(user.id, user.role)
+    return TokenResponse(access_token=token, user=UserResponse.model_validate(user, from_attributes=True))
+
+
 @router.post("/register", response_model=UserResponse, status_code=201)
 def register(request: RegisterRequest, db: Session = Depends(get_db)) -> User:
     email = request.email.lower()

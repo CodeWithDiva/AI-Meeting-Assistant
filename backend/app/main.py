@@ -25,6 +25,7 @@ from app.routers.auth import router as auth_router
 from app.routers.chat import router as chat_router
 from app.routers.live_transcription import router as live_transcription_router
 from app.routers.meetings import router as meetings_router
+from app.routers.messages import dm_ws_manager, router as messages_router
 from app.routers.notifications import router as notifications_router
 from app.routers.recording import router as recording_router
 from app.routers.search import router as search_router
@@ -49,6 +50,7 @@ async def lifespan(_: FastAPI):
     # Record the server's event loop so broadcasts fired from the meeting-bot
     # loop thread can be marshalled back onto it.
     ws_manager.bind_loop(asyncio.get_running_loop())
+    dm_ws_manager.bind_loop(asyncio.get_running_loop())
 
     # Deadline reminders and overdue alerts. 0 disables the sweep.
     sweep_seconds = float(os.getenv("TASK_REMINDER_SWEEP_SECONDS", "300"))
@@ -99,6 +101,7 @@ app.include_router(live_transcription_router)
 app.include_router(tts_router)
 app.include_router(voice_reply_router)
 app.include_router(notifications_router)
+app.include_router(messages_router)
 app.include_router(tasks_router)
 app.include_router(analysis_router)
 app.include_router(agent_router)

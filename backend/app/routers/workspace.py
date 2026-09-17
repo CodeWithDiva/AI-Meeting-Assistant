@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -23,7 +25,7 @@ from app.models import (
     TranscriptSegment,
     User,
 )
-from app.routers.chat import _ask_llm
+from app.routers.chat import _ask_llm, _ask_llm_stream
 from app.routers.tasks import _visible_tasks_query, serialize_task
 from app.services.deadlines import format_due
 
@@ -169,20 +171,13 @@ def _workspace_stats(user: User, db: Session) -> str:
     )
 
 
-@router.post("/api/workspace/ask", response_model=WorkspaceAnswer)
-async def ask_workspace(
-    request: WorkspaceQuestion,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> WorkspaceAnswer:
-    """Ask Alina something grounded in the whole workspace, not one meeting.
-
-    Meetings the question's own words show up in are favoured, topped up with
+def _build_workspace_context(question: str, user: User, db: Session) -> tuple[str, list[dict]]:
+    """Meetings the question's own words show up in are favoured, topped up with
     the most recent meetings so a vague question ("what's still open?") still
     gets an answer — capped low enough to keep the prompt fast on a modest CPU.
     """
     scope = _meeting_scope(user)
-    keywords = _keywords(request.question)
+    keywords = _keywords(question)
 
     matched_ids: list[int] = []
     if keywords:
@@ -262,9 +257,42 @@ async def ask_workspace(
     # (the assignee picker on every task form), so it costs nothing to state
     # plainly here too.
     context = f"{_workspace_stats(user, db)}\n\n{meeting_context}"
+    return context, sources
 
+
+@router.post("/api/workspace/ask", response_model=WorkspaceAnswer)
+async def ask_workspace(
+    request: WorkspaceQuestion,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> WorkspaceAnswer:
+    """Ask Alina something grounded in the whole workspace, not one meeting."""
+    context, sources = _build_workspace_context(request.question, user, db)
     answer = await _ask_llm(context, request.question, style="written")
     return WorkspaceAnswer(question=request.question, answer=answer, sources=sources)
+
+
+@router.post("/api/workspace/ask/stream")
+async def ask_workspace_stream(
+    request: WorkspaceQuestion,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """Same as `/api/workspace/ask`, but streams the answer as it's generated.
+
+    A "written" answer routinely takes 20-40+ seconds on this hardware — the
+    panel showing nothing for that whole time reads as broken/stuck. Plain
+    text chunks stream first; the very last chunk is a `sources` marker line
+    the frontend strips out, since JSON can't stream incrementally the same way.
+    """
+    context, sources = _build_workspace_context(request.question, user, db)
+
+    async def body():
+        async for piece in _ask_llm_stream(context, request.question, style="written"):
+            yield piece
+        yield f"\n␟{json.dumps(sources)}"
+
+    return StreamingResponse(body(), media_type="text/plain; charset=utf-8")
 
 
 # ── Export ──────────────────────────────────────────────────────────────

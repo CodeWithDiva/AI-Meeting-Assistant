@@ -294,6 +294,22 @@ export interface AdminAnalytics {
   overdue: ActionItem[];
 }
 
+/** Person-to-person direct messaging — admin<->employee or employee<->employee. */
+export interface DirectMessage {
+  id: number;
+  sender_id: number;
+  recipient_id: number;
+  body: string;
+  read_at?: string | null;
+  created_at: string;
+}
+
+export interface Conversation {
+  user: TeamMember;
+  last_message: DirectMessage | null;
+  unread_count: number;
+}
+
 export interface VoiceReplyResult {
   triggered?: boolean;
   message?: string;
@@ -397,6 +413,26 @@ async function downloadFile(endpoint: string, fallbackName: string): Promise<voi
 
 export const api = {
   // Auth
+  /** True on a brand-new install — no accounts exist yet, so the first-run
+   *  setup screen should show instead of the login form. */
+  async needsSetup(): Promise<boolean> {
+    const res = await apiRequest<{ needs_setup: boolean }>("/api/auth/setup-status");
+    return res.needs_setup;
+  },
+
+  /** Create the workspace's first account, as admin. Only works once — a
+   *  workspace that already has anyone in it refuses this permanently. */
+  async setupFirstAdmin(email: string, password: string, fullName: string): Promise<AuthResponse> {
+    const res = await apiRequest<AuthResponse>("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({ email, password, full_name: fullName }),
+    });
+    if (res.access_token) {
+      authStorage.setToken(res.access_token);
+    }
+    return res;
+  },
+
   async login(email: string, password: string): Promise<AuthResponse> {
     const res = await apiRequest<AuthResponse>("/api/auth/login", {
       method: "POST",
@@ -651,6 +687,56 @@ export const api = {
     });
   },
 
+  /**
+   * Same as `askWorkspace`, but calls `onChunk` as the answer streams in —
+   * a "written" answer can take 20-40s on modest hardware, and seeing it
+   * appear word-by-word reads as working, not stuck. Sources arrive only at
+   * the very end (they're not something that can stream incrementally).
+   */
+  async askWorkspaceStream(
+    question: string,
+    onChunk: (textSoFar: string) => void
+  ): Promise<{ question: string; answer: string; sources: Array<{ meeting_id: number; title: string }> }> {
+    const token = authStorage.getToken();
+    const response = await fetch(`${getApiBase()}/api/workspace/ask/stream`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ question }),
+    });
+    if (!response.ok || !response.body) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data?.detail || "Alina couldn't answer that right now.");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let raw = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      raw += decoder.decode(value, { stream: true });
+      // The sources marker only ever appears as the final chunk, but guard
+      // mid-stream too in case it arrives split across two reads.
+      const markerIndex = raw.indexOf("␟");
+      onChunk(markerIndex >= 0 ? raw.slice(0, markerIndex) : raw);
+    }
+
+    const markerIndex = raw.indexOf("␟");
+    const answer = (markerIndex >= 0 ? raw.slice(0, markerIndex) : raw).replace(/\n$/, "");
+    let sources: Array<{ meeting_id: number; title: string }> = [];
+    if (markerIndex >= 0) {
+      try {
+        sources = JSON.parse(raw.slice(markerIndex + 1));
+      } catch {
+        sources = [];
+      }
+    }
+    return { question, answer, sources };
+  },
+
   // Text-to-Speech (Block 3)
   async speakText(meetingId: number | string, text: string): Promise<{ audio_base64: string; content_type: string }> {
     return apiRequest<{ audio_base64: string; content_type: string }>(`/api/meetings/${meetingId}/tts/speak`, {
@@ -818,5 +904,32 @@ export const api = {
   getMeetingWebSocketUrl(meetingId: number | string): string {
     const base = getApiBase().replace(/^http/, "ws");
     return `${base}/api/meetings/${meetingId}/ws`;
+  },
+
+  // Direct messages — plain chat between two people, not meeting-scoped.
+  async getConversations(): Promise<Conversation[]> {
+    return apiRequest<Conversation[]>("/api/messages/conversations");
+  },
+
+  async getUnreadMessageCount(): Promise<number> {
+    const res = await apiRequest<{ unread: number }>("/api/messages/unread-count");
+    return res.unread;
+  },
+
+  async getMessageThread(otherUserId: number | string): Promise<DirectMessage[]> {
+    return apiRequest<DirectMessage[]>(`/api/messages/thread/${otherUserId}`);
+  },
+
+  async sendDirectMessage(recipientId: number, body: string): Promise<DirectMessage> {
+    return apiRequest<DirectMessage>("/api/messages", {
+      method: "POST",
+      body: JSON.stringify({ recipient_id: recipientId, body }),
+    });
+  },
+
+  getMessagesWebSocketUrl(): string {
+    const token = authStorage.getToken() || "";
+    const base = getApiBase().replace(/^http/, "ws");
+    return `${base}/api/messages/ws?token=${encodeURIComponent(token)}`;
   },
 };

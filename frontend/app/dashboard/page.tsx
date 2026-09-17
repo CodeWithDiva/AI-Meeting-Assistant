@@ -251,25 +251,25 @@ export default function DashboardPage() {
       </div>
 
       <div className="ledger-strip">
-        <div className="ledger-cell">
-          <div className="stat-header"><span className="stat-label">My meetings</span><Icon name="video" size={14} className="stat-icon" /></div>
+        <div className="ledger-cell ledger-cell-cyan">
+          <div className="stat-header"><span className="stat-label">My meetings</span><span className="stat-icon-badge"><Icon name="video" size={14} /></span></div>
           <span className="stat-value">{stats?.total_meetings ?? meetings.length}</span>
           <div className="stat-subtext">{stats?.recent_meetings ?? 0} this week</div>
         </div>
-        <div className="ledger-cell">
-          <div className="stat-header"><span className="stat-label">Open tasks</span><Icon name="checkSquare" size={14} className="stat-icon" /></div>
+        <div className="ledger-cell ledger-cell-amber">
+          <div className="stat-header"><span className="stat-label">Open tasks</span><span className="stat-icon-badge"><Icon name="checkSquare" size={14} /></span></div>
           <span className="stat-value">{pendingTasks.length + inProgressTasks.length}</span>
           <div className="stat-subtext">{stats?.my_open_tasks ?? 0} assigned to you</div>
         </div>
-        <div className="ledger-cell">
-          <div className="stat-header"><span className="stat-label">Due soon / overdue</span><Icon name="clock" size={14} className="stat-icon" /></div>
+        <div className="ledger-cell ledger-cell-rose">
+          <div className="stat-header"><span className="stat-label">Due soon / overdue</span><span className="stat-icon-badge"><Icon name="clock" size={14} /></span></div>
           <span className="stat-value" style={{ color: (stats?.overdue_tasks ?? 0) > 0 ? "var(--accent-rose)" : undefined }}>
             {(stats?.due_soon_tasks ?? 0) + (stats?.overdue_tasks ?? 0)}
           </span>
           <div className="stat-subtext">{stats?.overdue_tasks ?? 0} overdue</div>
         </div>
-        <div className="ledger-cell">
-          <div className="stat-header"><span className="stat-label">Completion rate</span><Icon name="chart" size={14} className="stat-icon" /></div>
+        <div className="ledger-cell ledger-cell-emerald">
+          <div className="stat-header"><span className="stat-label">Completion rate</span><span className="stat-icon-badge"><Icon name="chart" size={14} /></span></div>
           <span className="stat-value">{stats?.completion_rate ?? 0}%</span>
           <div className="progress-track" style={{ marginTop: 8 }}><div className="progress-fill" style={{ width: `${stats?.completion_rate ?? 0}%` }} /></div>
         </div>

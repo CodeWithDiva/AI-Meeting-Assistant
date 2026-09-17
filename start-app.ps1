@@ -11,9 +11,9 @@ if (-not (Test-Port 8000)) {
     Start-Process powershell.exe -ArgumentList @(
         "-NoExit",
         "-Command",
-        "Set-Location '$backend'; .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
+        "Set-Location '$backend'; .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
     )
-    Write-Host "Backend starting on http://127.0.0.1:8000"
+    Write-Host "Backend starting on http://0.0.0.0:8000 (reachable from other devices on this network too)"
 } else {
     Write-Host "Backend already running on port 8000"
 }
@@ -31,11 +31,16 @@ if (-not (Test-Port 3000)) {
     Start-Process powershell.exe -ArgumentList @(
         "-NoExit",
         "-Command",
-        "Set-Location '$frontend'; npm run dev"
+        "Set-Location '$frontend'; npx next dev -H 0.0.0.0 -p 3000"
     )
-    Write-Host "Frontend starting on http://localhost:3000 (Development mode with fast reload)"
+    Write-Host "Frontend starting on http://localhost:3000 (reachable from other devices on this network too)"
 } else {
     Write-Host "Frontend already running on port 3000"
 }
 
-Write-Host "Open http://localhost:3000/login"
+# Give the frontend a moment to come up, then open it for whoever double-clicked
+# the shortcut — they should never need to type a URL or a command themselves.
+Start-Sleep -Seconds 6
+Start-Process "http://localhost:3000"
+Write-Host "Opened http://localhost:3000 in your browser."
+Write-Host "Other computers on this network can reach it at: http://$(([System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1).IPAddressToString):3000"

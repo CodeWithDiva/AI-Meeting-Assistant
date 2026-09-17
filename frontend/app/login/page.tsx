@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import Icon from "@/app/components/Icon";
 import Waveform from "@/app/components/Waveform";
@@ -15,6 +15,15 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [successMsg, setSuccessMsg] = useState("");
+
+  useEffect(() => {
+    // A brand-new install has no accounts at all — send whoever opens the
+    // app straight to first-run setup instead of a login form with nothing
+    // to log into.
+    api.needsSetup().then((needed) => {
+      if (needed) router.replace("/setup");
+    }).catch(() => undefined);
+  }, [router]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
