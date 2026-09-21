@@ -301,6 +301,20 @@ class ZoomJoinStrategy:
         )
         return target is not None
 
+    async def dismiss_notices(self, page: Any) -> None:
+        """Clear pop-ups that appear once the bot is already in the meeting.
+
+        "This meeting is being recorded" shows up whenever the host starts a
+        recording — long after `_settle_in` ran — and sits over the whole
+        meeting view until someone clicks OK (seen on the bot's own window).
+        """
+        try:
+            if await page.get_by_text(re.compile("being recorded", re.I)).first.is_visible():
+                if await click_if_visible(page, r"^ok$|^got it$", 1_000):
+                    logger.info("Dismissed Zoom's recording notice.")
+        except Exception:
+            logger.debug("dismiss_notices failed", exc_info=True)
+
     async def active_speaker(self, page: Any) -> str | None:
         names = await read_texts(page, _ACTIVE_SPEAKER_SELECTORS, limit=1)
         return names[0] if names else None

@@ -41,15 +41,24 @@ MIC_INPUT_DEVICE = os.getenv("BOT_MIC_INPUT_DEVICE") or None
 def build_capture_stream(
     mic_speaker_name: str = "You",
     other_speaker_name: str = "Participant",
+    mix_mic: bool | None = None,
 ) -> MicCaptureStream:
-    """Build (but do not start) the configured capture stream."""
+    """Build (but do not start) the configured capture stream.
+
+    `mix_mic` overrides BOT_MIX_MIC for one caller. The bot that joins a
+    meeting itself passes False: everyone in the call — including the person
+    running it — already reaches the bot's own browser through the meeting, so
+    also mixing in a local microphone only adds a constant hiss (measured RMS
+    ~180 on a phone-as-microphone), doubles the user's voice, and hands
+    Whisper noise to invent words for.
+    """
     if CAPTURE_MODE == "cable":
         return MicCaptureStream(BOT_MIC_CAPTURE_DEVICE)
 
     return MicCaptureStream(
         LOOPBACK_DEVICE,
         loopback=True,
-        mix_mic=MIX_MIC,
+        mix_mic=MIX_MIC if mix_mic is None else mix_mic,
         mic_device=MIC_INPUT_DEVICE,
         mic_speaker_name=mic_speaker_name,
         other_speaker_name=other_speaker_name,

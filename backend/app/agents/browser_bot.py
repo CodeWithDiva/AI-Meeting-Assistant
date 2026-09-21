@@ -192,6 +192,24 @@ class BrowserMeetingBot:
             self.link.platform, self.link.meeting_code, self.meeting_id,
         )
 
+        # Getting into a meeting takes a while (browser launch, lobby); the
+        # Whisper models take 30-60s to load and warm on this machine. Do it
+        # now, in the background, so the first thing said in the meeting isn't
+        # what waits for them.
+        if os.getenv("WHISPER_PRELOAD", "1").strip().lower() not in {"0", "false", "no"}:
+            from app.services.memory_guard import low_memory_warning
+            from app.services.ws_manager import ws_manager
+            from app.transcription.base import FasterWhisperService
+
+            warning = low_memory_warning()
+            if warning:
+                logger.warning("Meeting %d: %s", self.meeting_id, warning)
+                try:
+                    await ws_manager.broadcast(self.meeting_id, "notice", {"message": warning})
+                except Exception:
+                    logger.debug("could not send the low-memory notice", exc_info=True)
+            asyncio.get_running_loop().run_in_executor(None, FasterWhisperService().preload)
+
         try:
             await self._launch_browser()
             await self._strategy.join(
@@ -477,6 +495,11 @@ class BrowserMeetingBot:
                 channel=channel,
                 args=self._LAUNCH_ARGS,
                 ignore_default_args=["--enable-automation"],
+                # Playwright adds --no-sandbox on its own unless told not to —
+                # which is where the persistent "unsupported command-line flag:
+                # --no-sandbox" banner on the bot's window really came from
+                # (removing it from _LAUNCH_ARGS never touched it).
+                chromium_sandbox=True,
                 **context_opts,
             )
 
@@ -558,9 +581,16 @@ class BrowserMeetingBot:
         """Keep the active speaker and roster fresh while the bot is listening."""
         assert self._page is not None and self._strategy is not None
         roster_countdown = 0
+        notice_countdown = 0
         try:
             while True:
                 try:
+                    notice_countdown -= 1
+                    dismiss = getattr(self._strategy, "dismiss_notices", None)
+                    if dismiss and notice_countdown <= 0:
+                        notice_countdown = 4
+                        await dismiss(self._page)
+
                     speaker = await self._strategy.active_speaker(self._page)
                     if speaker:
                         self._active_speaker = speaker
@@ -680,7 +710,9 @@ class BrowserMeetingBot:
             # which silenced every other app (including the user's own Zoom
             # client) for as long as the bot ran.
             self._mic_stream = build_capture_stream(
-                mic_speaker_name=BOT_DISPLAY_NAME, other_speaker_name="Participant"
+                mic_speaker_name=BOT_DISPLAY_NAME,
+                other_speaker_name="Participant",
+                mix_mic=False,
             )
             self._mic_stream.start()
         except ModuleNotFoundError as exc:

@@ -475,6 +475,12 @@ class MicCaptureStream:
                 continue
             if self.mix_mic:
                 chunk = self._mix_in_mic(chunk)
+            elif self.loopback:
+                # Without this line a silent meeting and a broken capture look
+                # identical from the outside.
+                self._level_log_counter = getattr(self, "_level_log_counter", 0) + 1
+                if self._level_log_counter % 25 == 0:  # roughly every 5s
+                    logger.info("Meeting audio level (speaker loopback) RMS=%.0f", _rms16(chunk))
             yield chunk
 
     def _mix_in_mic(self, loopback_chunk: bytes) -> bytes:

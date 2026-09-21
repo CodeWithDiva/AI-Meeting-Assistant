@@ -16,7 +16,12 @@ from app.services.live_pipeline import (
     SAMPLE_RATE,
     SILENCE_HANG_MS,
     LiveMeetingPipeline,
+    MAX_MERGED_WINDOW_S,
+    MIN_SPEECH_MS,
+    SOFT_CUT_AFTER_MS,
+    SOFT_HANG_MS,
     _append_transcript,
+    _normalize_level,
     _rms,
 )
 from app.transcription.base import StickyLanguage, is_hallucination
@@ -186,7 +191,7 @@ def test_soft_speech_in_a_quiet_room_is_still_detected(pipeline) -> None:
             await pipe.add_chunk(_pcm(200, amplitude=20))
         for _ in range(10):  # soft speech, under the old fixed 320 cut-off
             await pipe.add_chunk(_pcm(200, amplitude=400))
-        for _ in range(5):  # pause, closing the utterance
+        for _ in range(int(SILENCE_HANG_MS / 200) + 1):  # pause, closing the utterance
             await pipe.add_chunk(_pcm(200, amplitude=20))
 
     asyncio.run(run())
@@ -275,3 +280,174 @@ def test_a_forced_language_is_never_overridden() -> None:
     sticky = StickyLanguage(forced="en")
     sticky.observe("ur", 0.99)
     assert sticky.language_for_next_window() == "en"
+
+
+# ── Backlog handling ────────────────────────────────────────────────────
+
+
+def test_waiting_windows_from_one_speaker_are_transcribed_in_one_pass(pipeline) -> None:
+    pipe, windows, said = pipeline
+
+    async def run() -> None:
+        pipe._ensure_worker()
+        for _ in range(3):
+            pipe._work.put_nowait((_pcm(4_000), 4.0, 0.0, "Ali"))
+        await _settle(pipe)
+
+    asyncio.run(run())
+    # Whisper charges for a whole 30s window however short the audio, so
+    # three 4s utterances waiting in line cost one pass, not three.
+    assert windows == [12.0]
+
+
+def test_windows_are_not_merged_across_speakers(pipeline) -> None:
+    pipe, windows, said = pipeline
+
+    async def run() -> None:
+        pipe._ensure_worker()
+        pipe._work.put_nowait((_pcm(4_000), 4.0, 0.0, "Ali"))
+        pipe._work.put_nowait((_pcm(4_000), 4.0, 4.0, "Ali"))
+        pipe._work.put_nowait((_pcm(4_000), 4.0, 8.0, "Sara"))
+        await _settle(pipe)
+
+    asyncio.run(run())
+    assert windows == [8.0, 4.0]
+
+
+def test_merged_windows_stop_at_the_length_cap(pipeline) -> None:
+    pipe, windows, said = pipeline
+    each = MAX_MERGED_WINDOW_S * 0.6
+
+    async def run() -> None:
+        pipe._ensure_worker()
+        for i in range(2):
+            pipe._work.put_nowait((_pcm(int(each * 1000)), each, i * each, "Ali"))
+        await _settle(pipe)
+
+    asyncio.run(run())
+    # Two would exceed the cap together, so they stay separate windows.
+    assert windows == [each, each]
+
+
+def test_a_backlog_switches_to_the_quick_model_and_a_clear_queue_does_not(monkeypatch) -> None:
+    pipe = LiveMeetingPipeline(meeting_id=1)
+    modes: list[bool] = []
+
+    async def fake_transcribe(pcm_data, duration, start_at, speaker) -> list[str]:
+        modes.append(pipe._fast_mode)
+        return []
+
+    monkeypatch.setattr(pipe, "_transcribe", fake_transcribe)
+
+    async def run() -> None:
+        pipe._ensure_worker()
+        # Two different speakers queued back to back: the first pick leaves
+        # one still waiting (behind), the second finds the queue empty.
+        pipe._work.put_nowait((_pcm(2_000), 2.0, 0.0, "Ali"))
+        pipe._work.put_nowait((_pcm(2_000), 2.0, 2.0, "Sara"))
+        await pipe._work.join()
+
+    asyncio.run(run())
+    assert modes == [True, False]
+
+
+# ── Segmentation: coughs vs speech ──────────────────────────────────────
+
+
+def test_a_short_click_followed_by_a_long_pause_is_not_transcribed(pipeline) -> None:
+    pipe, windows, said = pipeline
+
+    async def run() -> None:
+        await pipe.add_chunk(_pcm(200))  # well under MIN_SPEECH_MS
+        for _ in range(int(SILENCE_HANG_MS / 200) + 3):
+            await pipe.add_chunk(_pcm(200, amplitude=0))
+        await pipe.flush()
+        await _settle(pipe)
+
+    asyncio.run(run())
+    assert 200 < MIN_SPEECH_MS
+    assert windows == []
+
+
+# ── Loudness normalisation ──────────────────────────────────────────────
+
+
+def test_quiet_speech_is_brought_up_to_a_workable_level() -> None:
+    quiet = _pcm(1_000, amplitude=400)
+    assert _rms(_normalize_level(quiet)) > _rms(quiet) * 3
+
+
+def test_loud_audio_is_left_exactly_as_captured() -> None:
+    loud = _pcm(1_000, amplitude=9_000)
+    assert _normalize_level(loud) == loud
+
+
+def test_normalisation_never_clips() -> None:
+    import array
+
+    quiet_with_a_spike = bytearray(_pcm(1_000, amplitude=300))
+    quiet_with_a_spike[100:102] = struct.pack("<h", 20_000)
+    out = array.array("h", _normalize_level(bytes(quiet_with_a_spike)))
+    assert max(abs(x) for x in out) <= 32_767
+
+
+def test_silence_is_returned_untouched() -> None:
+    silent = _pcm(500, amplitude=0)
+    assert _normalize_level(silent) == silent
+
+
+# ── Meeting end: the last utterance must not be lost ────────────────────
+
+
+def test_finalizing_waits_for_an_utterance_that_is_mid_transcription(monkeypatch) -> None:
+    pipe = LiveMeetingPipeline(meeting_id=1)
+    finished: list[str] = []
+
+    async def slow_transcribe(pcm_data, duration, start_at, speaker) -> list[str]:
+        await asyncio.sleep(0.3)
+        finished.append("last words")
+        return []
+
+    monkeypatch.setattr(pipe, "_transcribe", slow_transcribe)
+
+    async def run() -> None:
+        pipe._ensure_worker()
+        pipe._work.put_nowait((_pcm(2_000), 2.0, 0.0, "Ali"))
+        await asyncio.sleep(0.05)  # the worker has taken it out of the queue
+        assert pipe._work.empty()
+        await pipe._drain(5)
+
+    asyncio.run(run())
+    # The queue looked empty, but the final window was still being decoded —
+    # the drain has to wait for it, not return early and let it be cancelled.
+    assert finished == ["last words"]
+
+
+def test_a_long_utterance_is_cut_at_the_next_short_breath_not_mid_word(pipeline) -> None:
+    pipe, windows, said = pipeline
+
+    async def run() -> None:
+        for _ in range(int(SOFT_CUT_AFTER_MS / 200) + 2):  # past the soft-cut point
+            await pipe.add_chunk(_pcm(200))
+        # A breath far shorter than the normal end-of-utterance pause.
+        for _ in range(int(SOFT_HANG_MS / 200) + 1):
+            await pipe.add_chunk(_pcm(200, amplitude=0))
+        await _settle(pipe)
+
+    asyncio.run(run())
+    assert SOFT_HANG_MS < SILENCE_HANG_MS
+    assert len(windows) == 1
+    assert windows[0] < MAX_UTTERANCE_MS / 1000  # ended on the breath, not the hard cap
+
+
+def test_a_short_breath_does_not_end_a_short_utterance(pipeline) -> None:
+    pipe, windows, said = pipeline
+
+    async def run() -> None:
+        for _ in range(10):  # 2s of speech, nowhere near the soft-cut point
+            await pipe.add_chunk(_pcm(200))
+        for _ in range(int(SOFT_HANG_MS / 200) + 1):
+            await pipe.add_chunk(_pcm(200, amplitude=0))
+
+    asyncio.run(run())
+    assert windows == []  # still waiting for a real pause

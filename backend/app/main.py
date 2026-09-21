@@ -42,6 +42,12 @@ import app.models  # noqa: F401
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
+# Uvicorn only configures its own loggers, so everything in `app.*` at INFO —
+# joined the meeting, audio level, each transcribed window, language chosen —
+# was silently dropped, which made a silent meeting impossible to tell from a
+# broken pipeline.
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s:     %(name)s: %(message)s")
+logging.getLogger("app").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 

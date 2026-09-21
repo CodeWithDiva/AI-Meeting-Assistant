@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,21 @@ from typing import Protocol
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "small"
+
+# Loaded Whisper models, shared process-wide (see FasterWhisperService._load_model).
+_MODEL_CACHE: dict[str, object] = {}
+_MODEL_LOCK = threading.Lock()
+# When a model last failed to load, and how long to wait before trying it again.
+_MODEL_FAILED_AT: dict[str, float] = {}
+_RETRY_FAILED_LOAD_AFTER_S = 180.0
+# Silero VAD sensitivity. Lower keeps softer speech but lets more background
+# noise through to Whisper, which then invents words for it.
+try:
+    _VAD_THRESHOLD = float(os.getenv("WHISPER_VAD_THRESHOLD", "0.35"))
+except ValueError:
+    _VAD_THRESHOLD = 0.35
+# This many identical segments in a row is a hallucination loop, not speech.
+_LOOP_RUN_LENGTH = 4
 
 # Lower = faster, less accurate. 2 is a middle ground for live transcription on
 # a modest CPU; raise it (env WHISPER_BEAM_SIZE) if the machine can keep up.
@@ -153,6 +169,44 @@ def is_hallucination(text: str) -> bool:
     return stripped.casefold().strip(" .!?,۔") in _HALLUCINATIONS
 
 
+def _is_out_of_memory(error: BaseException) -> bool:
+    """True for the various ways CTranslate2/MKL report running out of RAM."""
+    if isinstance(error, MemoryError):
+        return True
+    text = str(error).lower()
+    return "allocate memory" in text or "out of memory" in text or "bad_alloc" in text
+
+
+def _normalized(text: str) -> str:
+    return re.sub(r"[\W_]+", " ", text.casefold()).strip()
+
+
+def collapse_repetitions(segments: list["TranscriptSegment"]) -> list["TranscriptSegment"]:
+    """Remove Whisper's repetition loops from one window's segments.
+
+    On noise or unclear audio Whisper can get stuck emitting the same sentence
+    over and over — seen live: "The globe is on the ground." twenty-one times
+    in a row, each a one-second segment, none of it ever spoken. A speaker does
+    not say the identical sentence five times running in separate breaths, so
+    a run that long is a loop and is dropped entirely (its first copy is as
+    invented as the rest); a shorter run of identical lines is collapsed to one.
+    """
+    result: list[TranscriptSegment] = []
+    i = 0
+    while i < len(segments):
+        j = i
+        key = _normalized(segments[i].text)
+        while j + 1 < len(segments) and _normalized(segments[j + 1].text) == key:
+            j += 1
+        run = j - i + 1
+        if run < _LOOP_RUN_LENGTH:
+            result.append(segments[i])
+        else:
+            logger.info("Dropped a Whisper repetition loop (%d x %r).", run, segments[i].text[:60])
+        i = j + 1
+    return result
+
+
 class FasterWhisperService:
     """Run faster-whisper without loading its model until first use."""
 
@@ -161,13 +215,22 @@ class FasterWhisperService:
         model_size: str | None = None,
         language: str | None = None,
     ) -> None:
+        # The model used for Urdu (and anything that isn't English) — the one
+        # where size really matters.
         self.model_size = model_size or os.getenv("WHISPER_MODEL", DEFAULT_MODEL)
+        # English is transcribed near-perfectly by `base` (measured), and it
+        # decodes ~3x faster than `small` — so a bigger Urdu model costs
+        # English meetings nothing but speed. Override with WHISPER_MODEL_EN.
+        self.english_model_size = os.getenv("WHISPER_MODEL_EN") or (
+            "base" if self.model_size in {"small", "medium", "large", "large-v2", "large-v3"}
+            else self.model_size
+        )
         # WHISPER_LANGUAGE="" / "auto" means detect; "ur" or "en" forces it.
         forced = language or os.getenv("WHISPER_LANGUAGE", "").strip().lower()
         self.language = forced if forced and forced != "auto" else None
-        self._model = None
+        self._last_size_used = self.model_size
 
-    def _load_model(self):
+    def _load_model(self, requested: str | None = None):
         try:
             from faster_whisper import WhisperModel
         except ImportError as error:
@@ -176,46 +239,139 @@ class FasterWhisperService:
                 "python -m pip install faster-whisper"
             ) from error
 
-        if self._model is not None:
-            return self._model
+        requested = requested or self.model_size
+        # Shared by every service instance and guarded by a lock: each meeting
+        # builds its own service, and loading `small` from scratch cost 25-60s
+        # (measured, on a RAM-starved machine) — on the first utterance of
+        # every single meeting. Loaded once, kept, and warmable ahead of time.
+        with _MODEL_LOCK:
+            if requested in _MODEL_CACHE:
+                return _MODEL_CACHE[requested]
 
-        threads = int(os.getenv("WHISPER_CPU_THREADS", "4"))
-        tried: list[str] = []
-        size = self.model_size
-        while size and size not in tried:
-            tried.append(size)
-            try:
-                logger.info("Loading faster-whisper model %r on CPU...", size)
-                self._model = WhisperModel(
-                    size, device="cpu", compute_type="int8", cpu_threads=threads
-                )
-                if size != self.model_size:
-                    logger.warning(
-                        "Loaded Whisper %r instead of %r (the configured model would "
-                        "not load — likely low memory). Transcription quality, "
-                        "especially for Urdu, will be lower.",
-                        size, self.model_size,
+            # Two threads, not four: measured on this 2-core/4-thread CPU, four
+            # oversubscribes it (0.65x vs 0.55x real-time for the same audio) and
+            # gets far worse the moment the bot's browser and the LLM are also
+            # running, which they always are during a meeting.
+            threads = int(os.getenv("WHISPER_CPU_THREADS", "2"))
+            size = requested
+            failed_at = _MODEL_FAILED_AT.get(requested)
+            if failed_at is not None and time.monotonic() - failed_at < _RETRY_FAILED_LOAD_AFTER_S:
+                # It failed to load moments ago (out of RAM); don't burn
+                # another 30s failing again — go straight to the fallback.
+                size = _MODEL_FALLBACKS.get(requested, requested)
+
+            tried: list[str] = []
+            while size and size not in tried:
+                tried.append(size)
+                if size != requested and size in _MODEL_CACHE:
+                    return _MODEL_CACHE[size]
+                try:
+                    logger.info("Loading faster-whisper model %r on CPU...", size)
+                    model = WhisperModel(
+                        size, device="cpu", compute_type="int8", cpu_threads=threads
                     )
-                self.model_size = size
-                return self._model
-            except (RuntimeError, MemoryError, OSError) as error:
-                fallback = _MODEL_FALLBACKS.get(size)
-                if not fallback:
-                    raise RuntimeError(
-                        f"Could not load any faster-whisper model (last tried {size!r}): "
-                        f"{error}"
-                    ) from error
-                logger.warning(
-                    "Whisper model %r failed to load (%s) — trying %r.",
-                    size, error, fallback,
-                )
-                size = fallback
-        raise RuntimeError("Could not load a faster-whisper model.")
+                except (RuntimeError, MemoryError, OSError) as error:
+                    fallback = _MODEL_FALLBACKS.get(size)
+                    if not fallback:
+                        raise RuntimeError(
+                            f"Could not load any faster-whisper model (last tried {size!r}): "
+                            f"{error}"
+                        ) from error
+                    logger.warning(
+                        "Whisper model %r failed to load (%s) — trying %r.",
+                        size, error, fallback,
+                    )
+                    _MODEL_FAILED_AT[requested] = time.monotonic()
+                    size = fallback
+                    continue
+
+                # Cache under the size that actually loaded. The fallback used
+                # to be stored under the *requested* name, so one bad moment of
+                # low RAM left the accurate model replaced by the quick one for
+                # the life of the server. Now the requested model is retried
+                # once the cooldown passes.
+                _MODEL_CACHE[size] = model
+                if size == requested:
+                    _MODEL_FAILED_AT.pop(requested, None)
+                else:
+                    logger.warning(
+                        "Using Whisper %r instead of %r for now (low memory) — "
+                        "Urdu accuracy will be lower until %r can load.",
+                        size, requested, requested,
+                    )
+                return model
+            raise RuntimeError("Could not load a faster-whisper model.")
+
+    def preload(self) -> None:
+        """Load both models and run one throwaway pass, off the critical path.
+
+        Blocking — call it from a worker thread. The bot calls this the moment
+        it starts joining a meeting, so the 30-60s of model loading (plus the
+        slow first inference) happens while it is still getting through the
+        lobby, instead of delaying the transcript of everyone's first words.
+        """
+        import numpy as np
+
+        started = time.monotonic()
+        for size in dict.fromkeys((self.english_model_size, self.model_size)):
+            try:
+                model = self._load_model(size)
+                # A second of faint noise: enough to make the first real call
+                # skip the one-off initialisation cost. No VAD, or it would
+                # drop the "audio" before the encoder ever ran.
+                noise = (np.random.default_rng(0).standard_normal(16000) * 0.01).astype("float32")
+                segments, _ = model.transcribe(noise, language="en", beam_size=1, vad_filter=False)
+                list(segments)
+            except Exception:
+                logger.exception("Whisper preload of %r failed — it will load on first use.", size)
+        logger.info("Whisper models warmed in %.1fs.", time.monotonic() - started)
+
+    def _choose_language(self, audio_path: Path, prefer: str | None = None) -> tuple[str, float]:
+        """Decide Urdu vs English for a window — never anything else.
+
+        Whisper's own auto-detect picks from ~100 languages, and on Urdu
+        speech it routinely answers Hindi (measured: 3 of 4 Urdu clips came
+        back `hi` at 0.8-0.9 confidence). Hindi output is Devanagari gibberish
+        for an Urdu meeting, and it also decodes 3-5x slower (measured 64s vs
+        19s for the same 16s clip), which is what made the live transcript
+        fall minutes behind. Spoken Hindi and Urdu are the same language, so
+        every Urdu-script/Hindustani-family guess counts as Urdu.
+
+        The two mistakes are not equally costly, so the call is biased. Forcing
+        `en` onto Urdu speech makes Whisper invent fluent, meaningless English
+        ("the globe is on the ground") — measured, and seen in a real meeting —
+        whereas forcing `ur` onto English speech just transliterates it into
+        Urdu script, which is still readable. So English has to be clearly
+        English (`WHISPER_EN_THRESHOLD`, default 0.85) to win; a meeting that
+        was English a moment ago keeps it on a lower bar (0.6) so a noisy
+        window doesn't flip it.
+        """
+        from faster_whisper.audio import decode_audio
+
+        detector = self._load_model(self.english_model_size)  # the cheap model
+        audio = decode_audio(str(audio_path), sampling_rate=16000)
+        _, _, probs = detector.detect_language(audio, language_detection_segments=1)
+        p = dict(probs)
+        p_en = p.get("en", 0.0)
+        # Languages Whisper confuses with Urdu, plus Urdu itself.
+        p_ur = sum(p.get(code, 0.0) for code in ("ur", "hi", "pa", "sd", "fa", "ar", "ps"))
+        total = (p_en + p_ur) or 1.0
+        p_en_norm = p_en / total
+        try:
+            strong = float(os.getenv("WHISPER_EN_THRESHOLD", "0.85"))
+        except ValueError:
+            strong = 0.85
+        bar = min(strong, 0.6) if prefer == "en" else strong
+        if p_en_norm >= bar:
+            return "en", p_en_norm
+        return "ur", 1.0 - p_en_norm
 
     async def transcribe(
         self,
         audio_path: Path,
         language: str | None = None,
+        fast: bool = False,
+        prefer: str | None = None,
     ) -> TranscriptResult:
         """Transcribe a file, auto-detecting Urdu vs English unless told.
 
@@ -232,24 +388,25 @@ class FasterWhisperService:
         look like the live transcript — and every other request — had hung).
         So the call and the full iteration run together in a worker thread.
         """
-        model = self._load_model()
         target = language or self.language
         loop = asyncio.get_event_loop()
         start = time.monotonic()
-        result = await loop.run_in_executor(None, self._transcribe_blocking, model, audio_path, target)
+        # Model loading (several seconds, first use) happens inside the worker
+        # thread too — done here on the event loop it froze the whole server.
+        result = await loop.run_in_executor(None, self._transcribe_blocking, audio_path, target, fast, prefer)
         elapsed = time.monotonic() - start
         if elapsed > 3:
             logger.warning(
                 "Whisper took %.1fs for a single window (model=%r, lang=%r) — "
                 "live transcription will lag behind real time by roughly that much.",
-                elapsed, self.model_size, target,
+                elapsed, self._last_size_used, result.language,
             )
         else:
-            logger.debug("Whisper transcribed a window in %.2fs (lang=%r).", elapsed, target)
+            logger.debug("Whisper transcribed a window in %.2fs (lang=%r).", elapsed, result.language)
         return result
 
-    def _transcribe_blocking(self, model, audio_path: Path, target: str | None) -> TranscriptResult:  # noqa: ANN001
-        """The actual CPU-bound work — always call this off the event loop."""
+    def _decode(self, model, audio_path: Path, target: str):  # noqa: ANN001
+        """Run one Whisper decode and filter the result. Returns (segments, texts, info)."""
         raw_segments, info = model.transcribe(
             str(audio_path),
             language=target,
@@ -264,7 +421,7 @@ class FasterWhisperService:
             # threshold means a softly-spoken sentence still gets transcribed.
             vad_parameters={
                 "min_silence_duration_ms": 400,
-                "threshold": 0.25,
+                "threshold": _VAD_THRESHOLD,
                 "speech_pad_ms": 200,
             },
             # Each live window is transcribed independently; carrying context
@@ -291,6 +448,11 @@ class FasterWhisperService:
             text = seg.text.strip()
             if not text or is_hallucination(text):
                 continue
+            # A segment that is itself highly repetitive ("no no no no no ...")
+            # is the loop happening inside one segment.
+            if getattr(seg, "compression_ratio", 0.0) > 2.4:
+                logger.debug("Dropped a repetitive segment: %r", text[:60])
+                continue
             # Whisper marks segments it believes are silence; on a live mic
             # those are room noise fitted to plausible words.
             if getattr(seg, "no_speech_prob", 0.0) > 0.75:
@@ -307,11 +469,59 @@ class FasterWhisperService:
                 )
                 continue
             segments.append(TranscriptSegment(text=text, start=seg.start, end=seg.end))
-            texts.append(text)
+        segments = collapse_repetitions(segments)
+        texts = [segment.text for segment in segments]
+        return segments, texts, info
 
+    def _transcribe_blocking(
+        self, audio_path: Path, target: str | None, fast: bool = False, prefer: str | None = None
+    ) -> TranscriptResult:
+        """The actual CPU-bound work — always call this off the event loop.
+
+        `fast` uses the small/quick model even for Urdu. The live pipeline sets
+        it while the transcript is running behind the meeting: on this CPU the
+        accurate Urdu model runs at roughly real time at best, so a backlog
+        never clears on its own — the quick model drains it ~3x faster, and
+        the accurate one takes over again as soon as it has caught up.
+        """
+        detected_confidence: float | None = None
+        if target is None:
+            target, detected_confidence = self._choose_language(audio_path, prefer)
+        size = self.english_model_size if (target == "en" or fast) else self.model_size
+        model = self._load_model(size)
+        self._last_size_used = size
+
+        try:
+            segments, texts, info = self._decode(model, audio_path, target)
+        except (RuntimeError, MemoryError) as error:
+            # This machine can be genuinely out of RAM mid-meeting (Ollama's
+            # 7B model alone holds ~5 GB). Whisper then dies with
+            # `mkl_malloc: failed to allocate memory` and, before this, that
+            # utterance was simply lost. The quick model needs a fraction of
+            # the memory, so answer with it instead of dropping the words.
+            quick = self.english_model_size
+            if not _is_out_of_memory(error) or size == quick:
+                raise
+            logger.warning(
+                "Whisper %r ran out of memory on a window — retrying it with %r: %s",
+                size, quick, error,
+            )
+            size = quick
+            model = self._load_model(size)
+            self._last_size_used = size
+            segments, texts, info = self._decode(model, audio_path, target)
+
+        # When we picked the language ourselves the decode was *told* it, so
+        # Whisper's own confidence is a meaningless 1.0 — report how sure the
+        # Urdu-vs-English decision actually was, so StickyLanguage only locks
+        # the meeting on a genuinely confident window.
         return TranscriptResult(
             full_text=" ".join(texts),
             segments=segments,
-            language=getattr(info, "language", None),
-            language_probability=getattr(info, "language_probability", 0.0) or 0.0,
+            language=target,
+            language_probability=(
+                detected_confidence
+                if detected_confidence is not None
+                else (getattr(info, "language_probability", 0.0) or 0.0)
+            ),
         )

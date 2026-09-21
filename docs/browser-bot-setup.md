@@ -85,9 +85,19 @@ Whisper `small` model pehli baar chalne par khud download ho jata hai (~480 MB).
 
 ```env
 OLLAMA_MODEL=qwen2.5:7b
-WHISPER_MODEL=small
-WHISPER_LANGUAGE=            # khali = Urdu/English khud pehchano
+WHISPER_MODEL=small          # Urdu ke liye (accurate)
+WHISPER_MODEL_EN=base        # English ke liye (tez, English par already behtareen)
+WHISPER_CPU_THREADS=2        # 2-core CPU par 4 se behtar (naapa hua)
+WHISPER_LANGUAGE=            # khali = sirf Urdu ya English chuno (Hindi ko Urdu gino)
 ```
+
+**Speed ke baare mein sach (2-core i5-4210U par naapa):** Urdu par `small` lagbhag
+real-time (~1x) chalta hai, `base` ~0.3x (tez lekin Urdu kamzor). Isliye transcript
+jab pichhe ho jaye to bot khud us window ke liye `base` use karta hai aur pakadne
+ke baad wapas `small`. Zyada tez/accurate transcript ke liye zyada cores wali CPU
+(ya GPU) chahiye — software se is hardware par is se zyada nahi niklta.
+Meeting ke dauran heavy apps (bohot saare Chrome tabs) band rakhein: Whisper ko
+CPU aur RAM chahiye.
 
 ## Step 6 — Agent chalayein
 

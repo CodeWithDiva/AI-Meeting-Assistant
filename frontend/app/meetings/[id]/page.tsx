@@ -140,6 +140,10 @@ export default function MeetingDetailPage() {
             if (typeof payload.mic_captured === "boolean") setMicCaptured(payload.mic_captured);
             if (payload.error) setError(payload.error);
             else if (payload.message) setSuccess(payload.message);
+          } else if (message.event === "notice") {
+            // A heads-up from the assistant that isn't a state change, e.g.
+            // "your PC is nearly out of memory — transcription will be less accurate".
+            if (payload.message) setError(payload.message);
           } else if (message.event === "notes_ready") {
             loadMeetingData();
           } else if (message.event === "ava_reply") {

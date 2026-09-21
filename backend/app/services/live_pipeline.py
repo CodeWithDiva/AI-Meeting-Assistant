@@ -52,9 +52,30 @@ SILENCE_RMS = 320          # starting guess, immediately adapted (see _speech_fl
 NOISE_FLOOR_MARGIN = 2.2   # speech must be this much louder than the noise floor
 MIN_SPEECH_RMS = 90        # never treat near-digital-silence as speech
 MAX_SPEECH_RMS = 400       # never demand more than this, however noisy the room
-SILENCE_HANG_MS = 700      # pause that ends an utterance
-MIN_UTTERANCE_MS = 1_200   # ignore coughs/keyboard clicks
+# A pause has to be a real one to end an utterance. At 700ms nearly every
+# sentence boundary cut the audio, and since Whisper charges for a full
+# 30-second window per call however short the audio, that meant many tiny,
+# expensive windows (measured: 9 windows for 37s of speech).
+SILENCE_HANG_MS = 1_100    # pause that ends an utterance
+MIN_UTTERANCE_MS = 1_200   # floor on a window's total length (speech + closing pause)
+# Speech (not counting the pause that closes it) needed for a window to be
+# worth sending to Whisper at all — a cough or keyboard click is shorter than
+# this. Measured on speech alone because the closing pause is now long enough
+# (SILENCE_HANG_MS) that a lone click plus its pause used to clear the old
+# whole-window minimum and cost a full transcription pass.
+MIN_SPEECH_MS = 500
 MAX_UTTERANCE_MS = 20_000  # hard cut so one long talker still streams
+# Before that hard cut lands mid-word, look for the next natural pause: once an
+# utterance has run this long, an ordinary short breath is enough to end it.
+# (Measured: a 20s hard cut split "...ہو تو ابھی بتا دیں" across two windows
+# and the 3s tail was lost.)
+SOFT_CUT_AFTER_MS = 12_000
+SOFT_HANG_MS = 450
+# Upper bound when the worker merges queued utterances into one window. Well
+# under Whisper's own 30s window: measured, a 26s merged window transcribed
+# Urdu noticeably worse than shorter ones (it dropped and garbled a sentence),
+# while ~16s still cuts the per-second cost by half or more.
+MAX_MERGED_WINDOW_S = 16.0
 
 # How long to keep draining queued utterances once the meeting ends. Whisper
 # on a slow CPU can be several minutes behind a long meeting; the tail of the
@@ -89,10 +110,15 @@ class LiveMeetingPipeline:
 
         self._service = FasterWhisperService()
         self._language = StickyLanguage()
+        # Language of the last window that produced text — breaks ties only.
+        self._last_language: str | None = None
         self._lock = asyncio.Lock()
+        # True while the transcript is behind the meeting — see _worker_loop.
+        self._fast_mode = False
 
         self._buffer = bytearray()
         self._silence_ms = 0
+        self._speech_ms = 0
         self._offset = 0.0
         # Rolling estimate of how loud this room is when nobody is talking,
         # used to decide what counts as speech. See _speech_floor().
@@ -142,17 +168,28 @@ class LiveMeetingPipeline:
                 self._silence_ms += chunk_ms
             else:
                 self._silence_ms = 0
+                self._speech_ms += chunk_ms
 
             buffered_ms = len(self._buffer) / (self.sample_rate * BYTES_PER_SAMPLE) * 1000
-            ended_on_pause = (
-                self._silence_ms >= SILENCE_HANG_MS and buffered_ms >= MIN_UTTERANCE_MS
-            )
+            hang = SILENCE_HANG_MS if buffered_ms < SOFT_CUT_AFTER_MS else SOFT_HANG_MS
+            paused = self._silence_ms >= hang
+            if paused and self._speech_ms < MIN_SPEECH_MS:
+                # A cough or click followed by quiet: not worth a Whisper pass.
+                # Drop it now rather than letting silence pile up around it.
+                self._offset += buffered_ms / 1000
+                self._buffer.clear()
+                self._silence_ms = 0
+                self._speech_ms = 0
+                return []
+
+            ended_on_pause = paused and buffered_ms >= MIN_UTTERANCE_MS
             if not ended_on_pause and buffered_ms < MAX_UTTERANCE_MS:
                 return []
 
             window = bytes(self._buffer)
             self._buffer.clear()
             self._silence_ms = 0
+            self._speech_ms = 0
             duration = buffered_ms / 1000
 
             if _rms(window) < self._speech_floor():
@@ -172,6 +209,8 @@ class LiveMeetingPipeline:
                 return []
             window = bytes(self._buffer)
             self._buffer.clear()
+            self._silence_ms = 0
+            self._speech_ms = 0
             duration = len(window) / (self.sample_rate * BYTES_PER_SAMPLE)
             if _rms(window) < self._speech_floor():
                 self._offset += duration
@@ -221,40 +260,89 @@ class LiveMeetingPipeline:
             self._worker = asyncio.create_task(self._worker_loop())
 
     async def _worker_loop(self) -> None:
-        """Transcribe queued utterances one at a time, forever."""
-        while True:
-            window, duration, start_at, speaker = await self._work.get()
-            try:
-                texts = await self._transcribe(window, duration, start_at, speaker)
-                if self._on_text:
-                    for text in texts:
-                        try:
-                            await self._on_text(text)
-                        except Exception:
-                            logger.exception(
-                                "on_text callback failed for meeting %d", self.meeting_id
-                            )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # One bad utterance must not stop the queue draining.
-                logger.exception(
-                    "Transcription worker failed on one utterance for meeting %d",
-                    self.meeting_id,
+        """Transcribe queued utterances, merging whatever has piled up.
+
+        Whisper pads every window to 30 seconds before encoding, so a 2-second
+        utterance costs the same ~10s of CPU (measured, `small` on this
+        machine) as a 25-second one. Transcribing each short utterance alone
+        therefore ran at roughly 3x real time — 117s to transcribe 37s of
+        continuous Urdu — and the transcript fell further behind the longer
+        the meeting ran. So when utterances are waiting, consecutive ones from
+        the same speaker are joined into a single window (up to
+        MAX_MERGED_WINDOW_S) and paid for once. When the queue is empty an
+        utterance is still transcribed immediately, by itself, so a quiet
+        meeting keeps its low latency.
+        """
+        carry = None
+        try:
+            while True:
+                first = carry if carry is not None else await self._work.get()
+                carry = None
+                batch = [first]
+                total = first[1]
+                while True:
+                    try:
+                        nxt = self._work.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if nxt[3] != first[3] or total + nxt[1] > MAX_MERGED_WINDOW_S:
+                        carry = nxt  # starts the next batch
+                        break
+                    batch.append(nxt)
+                    total += nxt[1]
+
+                window = b"".join(item[0] for item in batch)
+                start_at, speaker = first[2], first[3]
+                # Anything still waiting (or just merged) means the transcript
+                # is behind the meeting: take the quick model for this one so
+                # the backlog actually clears. An empty queue means we are
+                # caught up, so the accurate model gets to run.
+                self._fast_mode = (
+                    len(batch) > 1 or carry is not None or not self._work.empty()
                 )
-            finally:
-                # Exactly once per get(), including on cancellation, or
-                # _drain()'s join() would hang forever.
+                try:
+                    texts = await self._transcribe(window, total, start_at, speaker)
+                    if self._on_text:
+                        for text in texts:
+                            try:
+                                await self._on_text(text)
+                            except Exception:
+                                logger.exception(
+                                    "on_text callback failed for meeting %d", self.meeting_id
+                                )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # One bad utterance must not stop the queue draining.
+                    logger.exception(
+                        "Transcription worker failed on one utterance for meeting %d",
+                        self.meeting_id,
+                    )
+                finally:
+                    # Exactly once per get()/get_nowait(), including on
+                    # cancellation, or _drain()'s join() would hang forever.
+                    for _ in batch:
+                        self._work.task_done()
+        finally:
+            if carry is not None:
                 self._work.task_done()
 
     async def _drain(self, timeout: float) -> None:
         """Wait for queued utterances to finish, up to `timeout` seconds."""
-        if self._work is None or self._work.empty():
+        if self._work is None:
             return
-        logger.info(
-            "Meeting %d: waiting for %d queued utterance(s) to transcribe...",
-            self.meeting_id, self._work.qsize(),
-        )
+        # Not `if self._work.empty(): return` — an empty queue does not mean
+        # nothing is left: the worker takes the last utterance *out* of the
+        # queue before transcribing it, so "empty" was true for the whole time
+        # the final window was still being decoded. Finalizing then went ahead
+        # and cancelled it, and the end of every meeting — where the decisions
+        # usually are — could be lost. join() counts in-flight work too, and
+        # returns immediately when there is truly nothing left.
+        if self._work.qsize():
+            logger.info(
+                "Meeting %d: waiting for %d queued utterance(s) to transcribe...",
+                self.meeting_id, self._work.qsize(),
+            )
         try:
             await asyncio.wait_for(self._work.join(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -288,9 +376,18 @@ class LiveMeetingPipeline:
                 wav_file.setnchannels(1)
                 wav_file.setsampwidth(BYTES_PER_SAMPLE)
                 wav_file.setframerate(self.sample_rate)
-                wav_file.writeframes(pcm_data)
+                wav_file.writeframes(_normalize_level(pcm_data))
+            # The language is decided fresh for every window (Urdu vs English,
+            # biased to Urdu), not locked from the first one. Locking meant one
+            # noisy opening window could put a whole Urdu meeting on English —
+            # which Whisper then "transcribes" as invented English (seen live).
+            # An operator-forced language (WHISPER_LANGUAGE) still wins; the
+            # previous window's language only breaks ties.
             result = await self._service.transcribe(
-                path, language=self._language.language_for_next_window()
+                path,
+                language=self._language.forced,
+                fast=self._fast_mode,
+                prefer=self._last_language,
             )
         except Exception:
             logger.exception("Live transcription failed for meeting %d", self.meeting_id)
@@ -306,6 +403,13 @@ class LiveMeetingPipeline:
             await _safe_unlink(path)
 
         self._language.observe(result.language, result.language_probability)
+        if result.segments and result.language:
+            self._last_language = result.language
+        logger.info(
+            "Meeting %d window: language=%s (%.2f) model=%s fast=%s lines=%d",
+            self.meeting_id, result.language, result.language_probability,
+            self._service._last_size_used, self._fast_mode, len(result.segments),
+        )
 
         texts = [segment.text.strip() for segment in result.segments if segment.text.strip()]
         if not texts:
@@ -504,6 +608,34 @@ async def _safe_unlink(path: Path, attempts: int = 5, delay: float = 0.1) -> Non
             await asyncio.sleep(delay)
         except OSError:
             return
+
+
+def _normalize_level(pcm_data: bytes, target_rms: float = 2500.0, max_gain: float = 6.0) -> bytes:
+    """Bring quiet speech up to a level Whisper handles well.
+
+    Whisper's features are not level-invariant: a voice squashed by Zoom's
+    codec, or a phone mic over Wi-Fi, can arrive so quiet that words are lost
+    even though the VAD (which adapts to the room) correctly called it
+    speech. Only ever amplifies — capped, and never into clipping — so loud
+    audio is left exactly as captured. Falls back to the original bytes if
+    numpy isn't there.
+    """
+    try:
+        import numpy as np
+    except ModuleNotFoundError:
+        return pcm_data
+    usable = len(pcm_data) - (len(pcm_data) % BYTES_PER_SAMPLE)
+    if usable <= 0:
+        return pcm_data
+    samples = np.frombuffer(pcm_data[:usable], dtype="<i2").astype(np.float32)
+    level = float(np.sqrt(np.mean(samples * samples)))
+    peak = float(np.max(np.abs(samples)))
+    if level <= 0 or peak <= 0:
+        return pcm_data
+    gain = min(target_rms / level, max_gain, 30000.0 / peak)
+    if gain <= 1.15:
+        return pcm_data
+    return np.clip(samples * gain, -32768, 32767).astype("<i2").tobytes()
 
 
 def _rms(pcm_data: bytes) -> float:
