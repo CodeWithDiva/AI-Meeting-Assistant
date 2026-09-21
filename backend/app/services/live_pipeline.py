@@ -559,16 +559,12 @@ class LiveMeetingPipeline:
         with SessionLocal() as db:
             meeting = db.scalar(select(Meeting).where(Meeting.id == self.meeting_id))
             transcript = meeting.transcript if meeting else None
-            # The names the bot read off the meeting UI are what let the model
-            # attribute each task to a real person.
-            participants = [
-                p.name for p in db.scalars(
-                    select(Participant).where(
-                        Participant.meeting_id == self.meeting_id,
-                        Participant.role == "human",
-                    )
-                )
-            ]
+            # The people on the call plus the registered team: what lets the
+            # model (or the offline fallback) attribute each task to a real,
+            # notifiable person even when Whisper spelled the name its own way.
+            from app.services.meeting_analysis import build_roster
+
+            participants = build_roster(self.meeting_id, db)
 
         if not transcript or not transcript.strip():
             logger.info("Meeting %d produced no transcript — nothing to analyze.", self.meeting_id)

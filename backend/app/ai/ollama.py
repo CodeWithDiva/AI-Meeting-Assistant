@@ -22,6 +22,9 @@ import os
 import re
 from typing import Any
 
+from app.ai.prompts import build_notes_prompt as _build_prompt
+from app.services.name_matching import phonetic_keys
+
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -43,65 +46,6 @@ def detect_transcript_language(transcript: str) -> str:
         return "en"
     urdu = sum(1 for c in letters if _URDU_CHARS.match(c))
     return "ur" if urdu / len(letters) >= _URDU_SHARE_THRESHOLD else "en"
-
-
-def _build_prompt(transcript: str, participants: list[str] | None, language: str) -> str:
-    if language == "ur":
-        language_rule = (
-            "یہ میٹنگ اردو میں ہے۔ summary، decisions اور tasks سب اردو میں لکھیں۔ "
-            "ناموں، اعداد اور انگریزی اصطلاحات (deadline, client, report) کو ویسے ہی رہنے دیں۔"
-        )
-    else:
-        language_rule = (
-            "Write the summary, decisions and tasks in English. "
-            "If the meeting is in Roman Urdu, keep the speakers' own wording for "
-            "names, dates and technical terms instead of translating them away."
-        )
-
-    roster = ""
-    if participants:
-        roster = (
-            "\nPeople in this meeting (use these exact names for assignees "
-            "whenever the transcript refers to them):\n  "
-            + ", ".join(participants)
-            + "\n"
-        )
-
-    return (
-        "You are an expert meeting analyst. Read the transcript and extract "
-        "structured notes.\n\n"
-        f"{language_rule}\n"
-        f"{roster}\n"
-        "Return ONLY valid JSON with exactly these keys:\n"
-        '  "summary": (string) what the meeting was about and what came out of it\n'
-        '  "decisions": (array of strings) each decision the group actually settled on\n'
-        '  "action_items": (array of objects) each with:\n'
-        '      "assignee":    (string) the ONE person who must do it\n'
-        '      "assigned_by": (string or null) who gave them the task\n'
-        '      "task":        (string) what exactly they must do\n'
-        '      "deadline":    (string or null) when it is due, in the words used\n\n'
-        "Rules:\n"
-        "- The transcript is labelled with speaker names like '[Ali]: ...'. "
-        "That label is only who was SPEAKING. It is NOT automatically the "
-        "assignee.\n"
-        "- CRITICAL — the assignee is the person NAMED IN THE SENTENCE as the "
-        "one who must do the work, not the person who said it. Examples:\n"
-        "    '[Sara]: Ali will send the report'  -> assignee 'Ali', assigned_by 'Sara'\n"
-        "    '[Sara]: Bilal ko report bhejni hai' -> assignee 'Bilal', assigned_by 'Sara'\n"
-        "    '[Sara]: I will send the report'    -> assignee 'Sara', assigned_by null\n"
-        "  Only fall back to the speaker when they clearly took the task "
-        "themselves ('I will…', 'main kar dunga', 'let me handle it').\n"
-        "- Never invent a person who does not appear in the transcript.\n"
-        "- One object per person per task. If three people were each given "
-        "something, return three objects.\n"
-        "- A decision is something the group AGREED. Do not list mere "
-        "suggestions, questions, or things still being debated.\n"
-        "- If a task has no clear owner, set \"assignee\" to null rather than "
-        "guessing.\n"
-        "- If nothing was decided or assigned, return empty arrays. Never "
-        "invent content to fill them.\n\n"
-        "Transcript:\n\n" + transcript
-    )
 
 
 async def _installed_models(client: httpx.AsyncClient, base_url: str) -> list[str]:
@@ -148,7 +92,10 @@ async def analyze_with_ollama(
         "stream": False,
         # Near-zero temperature: notes must reflect the transcript, not the
         # model's imagination.
-        "options": {"temperature": 0.1, "num_ctx": 8192},
+        # The JSON is small; without a cap a rambling model can keep
+        # generating for minutes on this CPU. Urdu-script output costs ~3-4
+        # tokens per word, hence the headroom over an English-sized answer.
+        "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 900},
         # Keep the model resident — see the matching note in chat.py's
         # _ask_llm. A meeting's wake-word replies and its end-of-meeting
         # analysis both use this model; without this they fight the 5-minute
@@ -156,7 +103,11 @@ async def analyze_with_ollama(
         "keep_alive": "30m",
     }
 
-    async with httpx.AsyncClient(timeout=300) as client:
+    # Measured on this CPU: an Urdu-script meeting took longer than the old 300s
+    # limit (model load + a long Urdu prompt + Urdu output), and then fell all
+    # the way back to the offline extractor. The user is waiting for notes at
+    # the end of a meeting either way, so wait for the real answer.
+    async with httpx.AsyncClient(timeout=900) as client:
         try:
             response = await client.post(f"{base_url}/api/generate", json=payload)
             if response.status_code == 404:
@@ -193,6 +144,9 @@ async def analyze_with_ollama(
         raise RuntimeError("Ollama returned a non-object analysis response.")
 
     notes = _normalize(parsed)
+    _snap_assignees(notes, participants, transcript)
+    _snap_assigned_by(notes, participants)
+    _fill_missing_deadlines(notes, transcript)
     notes["language"] = language
     notes["provider"] = f"ollama:{model}"
     return notes
@@ -249,3 +203,99 @@ def _clean_optional(value: Any) -> str | None:
     if not cleaned or cleaned.casefold() in {"null", "none", "n/a", "na", "-", "unknown"}:
         return None
     return cleaned
+
+
+def _snap_assignees(notes: dict[str, Any], roster: list[str] | None, transcript: str) -> None:
+    """Fix each assignee against the roster, and blank the ones nobody said.
+
+    A small model may return a name in Urdu script when the roster has it in
+    Latin ("تاسمیہ" vs "Tasmia"), or a slightly mis-heard spelling — both then
+    fail to resolve to a real account and the task reaches nobody. Snap to the
+    roster spelling when exactly one person fits (exactly or by sound). And a
+    name that is in neither the roster nor the transcript was invented; a task
+    with no owner is better than one handed to a stranger.
+    """
+    roster = [name for name in (roster or []) if name]
+    lowered = transcript.casefold()
+    for item in notes.get("action_items", []):
+        name = item.get("assignee")
+        if not name:
+            continue
+        exact = [r for r in roster if r.casefold() == name.casefold()]
+        if exact:
+            item["assignee"] = exact[0]
+            continue
+        keys = phonetic_keys(name, min_len=1)
+        sounds_like = [r for r in roster if keys and keys & phonetic_keys(r, min_len=1)]
+        if len(sounds_like) == 1:
+            item["assignee"] = sounds_like[0]
+            continue
+        first_token = name.split()[0].casefold() if name.split() else ""
+        if first_token and first_token not in lowered:
+            logger.info("Assignee %r appears nowhere in the meeting — leaving the task unassigned.", name)
+            item["assignee"] = None
+
+
+_FIRST_PERSON_WORDS = {"i", "i'll", "main", "mein", "mai", "میں"}
+
+
+def _same_person(a: str | None, b: str | None) -> bool:
+    if not a or not b:
+        return False
+    if a.casefold() == b.casefold():
+        return True
+    keys_a, keys_b = phonetic_keys(a, min_len=2), phonetic_keys(b, min_len=2)
+    return bool(keys_a & keys_b)
+
+
+def _snap_assigned_by(notes: dict[str, Any], roster: list[str] | None) -> None:
+    """Tidy `assigned_by`: roster spelling, and never the assignee themselves."""
+    roster = [name for name in (roster or []) if name]
+    for item in notes.get("action_items", []):
+        giver = item.get("assigned_by")
+        if not giver:
+            continue
+        if _same_person(giver, item.get("assignee")):
+            item["assigned_by"] = None  # "I will..." — nobody handed it to them
+            continue
+        match = [r for r in roster if _same_person(giver, r)]
+        if len(match) == 1:
+            item["assigned_by"] = match[0]
+
+
+def _fill_missing_deadlines(notes: dict[str, Any], transcript: str) -> None:
+    """Recover a deadline the model dropped, from the sentence that names the owner.
+
+    Small models drop the deadline when a task sits in a long sentence. The
+    fallback's deadline patterns are deterministic, so use them — but only on a
+    clause where the assignee is the *subject* (one of its first two words),
+    since a deadline lifted from the wrong sentence would set off false
+    reminders and overdue alerts, which is worse than no deadline.
+    """
+    from app.ai.fallback import _CLAUSE_SPLIT, _lines, _split_deadline
+
+    clauses = [
+        (speaker, c.strip())
+        for speaker, sentence in _lines(transcript)
+        for c in _CLAUSE_SPLIT.split(sentence)
+    ]
+    for item in notes.get("action_items", []):
+        name = item.get("assignee")
+        if not name or item.get("deadline"):
+            continue
+        owner_tokens = {t.casefold() for t in re.split(r"\s+", name) if t}
+        owner_keys = phonetic_keys(name, min_len=2)
+        for speaker, clause in clauses:
+            words = [w for w in re.split(r"[\s,.:;!?،۔]+", clause) if w][:2]
+            is_subject = any(
+                w.casefold() in owner_tokens or (owner_keys and owner_keys & phonetic_keys(w, min_len=2))
+                for w in words
+            )
+            # "I will check it today" said by the owner themselves.
+            first_person = bool(words) and words[0].casefold() in _FIRST_PERSON_WORDS
+            if not is_subject and not (first_person and _same_person(speaker, name)):
+                continue
+            _, deadline = _split_deadline(clause)
+            if deadline:
+                item["deadline"] = deadline
+                break

@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.models import ActionItem, Decision, Meeting, Notification, Summary, User
 from app.services.deadlines import parse_deadline
+from app.services.name_matching import phonetic_keys
 from app.services.notifier import notify_task_assigned
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,9 @@ def resolve_assignee(name: str | None, db: Session) -> User | None:
     if not wanted:
         return None
 
+    wanted_keys = phonetic_keys(normalized)
     matches = []
+    sounds_like = []
     for user in db.scalars(select(User)):
         candidates = set()
         if user.full_name:
@@ -100,6 +103,10 @@ def resolve_assignee(name: str | None, db: Session) -> User | None:
             candidates.add(user.email.split("@")[0].casefold())
         if wanted & candidates:
             matches.append(user)
+        elif wanted_keys and wanted_keys & (
+            phonetic_keys(user.full_name) | phonetic_keys(user.email.split("@")[0] if user.email else None)
+        ):
+            sounds_like.append(user)
 
     if len(matches) == 1:
         return matches[0]
@@ -107,6 +114,20 @@ def resolve_assignee(name: str | None, db: Session) -> User | None:
         logger.info(
             "Assignee %r is ambiguous across %d users — leaving it unlinked.",
             normalized, len(matches),
+        )
+        return None
+
+    # No spelling match. A meeting held in Urdu names people in Urdu script
+    # ("تاسمیہ") while accounts are registered in Latin ("Tasmia"), which no
+    # string comparison can bridge — so fall back to how the name *sounds*, but
+    # only when exactly one person fits.
+    if len(sounds_like) == 1:
+        logger.info("Assignee %r matched %r by sound.", normalized, sounds_like[0].full_name)
+        return sounds_like[0]
+    if len(sounds_like) > 1:
+        logger.info(
+            "Assignee %r sounds like %d users — leaving it unlinked.",
+            normalized, len(sounds_like),
         )
     return None
 

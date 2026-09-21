@@ -25,6 +25,6 @@ async def analyze_meeting(
         return await analyze_with_ollama(transcript, participants)
     except (RuntimeError, ValueError) as error:
         logger.warning("Ollama analysis unavailable; using offline fallback: %s", error)
-        notes = analyze_with_fallback(transcript)
+        notes = analyze_with_fallback(transcript, participants)
         notes["provider"] = "fallback"
         return notes
