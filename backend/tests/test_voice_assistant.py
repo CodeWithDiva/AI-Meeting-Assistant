@@ -15,6 +15,17 @@ def test_wake_word_supports_english_and_urdu(alina: AvaVoiceAssistant) -> None:
     assert alina._question_after_wake_word("The team discussed the roadmap.") is None
 
 
+def test_wake_word_matches_the_spellings_whisper_actually_produces(alina: AvaVoiceAssistant) -> None:
+    """Not guessed spellings — measured by round-tripping "Alina" through
+    edge-tts's Urdu voice and this project's own Whisper `small` model
+    (forced Urdu, same as the live pipeline). Before this, the registered
+    spellings ("الینا"/"علینا") were not what Whisper ever actually wrote, so
+    the wake word could never fire from real Urdu speech.
+    """
+    assert alina._question_after_wake_word("علینہ آج کیا ہوا؟") == "آج کیا ہوا"
+    assert alina._question_after_wake_word("ایلینا میٹنگ کب ہے؟") == "میٹنگ کب ہے"
+
+
 def test_the_wake_word_follows_the_configured_name() -> None:
     # Renaming the bot renames what it answers to — the old name stops working.
     ava = AvaVoiceAssistant(meeting_id=1, wake_word="ava")

@@ -109,6 +109,7 @@ class ZoomJoinStrategy:
 
         await _human_type(name_field, display_name)
         await asyncio.sleep(random.uniform(0.4, 0.9))
+        await self._turn_off_video_preview(frame)
 
         join_btn = await find_first_visible(
             frame,
@@ -145,6 +146,23 @@ class ZoomJoinStrategy:
             raise JoinFailedError(blocked)
 
         await self._settle_in(page)
+
+    async def _turn_off_video_preview(self, frame: Any) -> None:
+        """Turn the pre-join camera preview off before it ever gets used.
+
+        This bot never sends video, so there is no reason for the pre-join
+        screen to try to open the physical webcam at all. Measured live: with
+        the camera preview left on, Zoom's own "Close those apps and try
+        again" media error appeared and the Join button spun forever whenever
+        anything else on the machine (a real Zoom client, another browser
+        tab, Teams) already held the camera — the join never completed and
+        looked identical to a plain hang. Stopping the preview first means
+        the join never depends on this bot getting the camera at all.
+        """
+        try:
+            await click_if_visible(frame, r"stop video|stop my video|disable my video", 2_000)
+        except Exception:
+            logger.debug("No video preview to turn off (or already off).", exc_info=True)
 
     async def _detect_bot_block(self, scope: Any) -> str | None:
         """Return an actionable message if Zoom blocked the join, else None."""

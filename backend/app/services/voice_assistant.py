@@ -59,8 +59,16 @@ WAKE_WORD = (
 ).strip().casefold()
 
 # Urdu-script spellings of the wake word, checked as exact substrings.
+# "علینہ" and "ایلینا" are not guesses — measured by round-tripping "Alina"
+# through edge-tts's Urdu voice and this project's own Whisper `small` model
+# (language forced to Urdu, same as the live pipeline): three different
+# spoken forms of the name came back as one of those two spellings, and
+# neither is what was in this list before, which meant the wake word could
+# never fire from Urdu speech at all. Re-measure with
+# `PYTHONIOENCODING=utf-8` before changing this list — a plausible-looking
+# spelling that Whisper never actually produces is worse than an empty list.
 _URDU_WAKE_WORDS = {
-    "alina": ("الینا", "علینا"),
+    "alina": ("علینہ", "ایلینا", "الینا", "علینا"),
     "ava": ("اوا", "ایوا"),
 }
 

@@ -69,6 +69,7 @@ except ValueError:
 # rather than failing the whole request.
 _MODEL_FALLBACKS = {
     "large-v3": "medium",
+    "large-v3-turbo": "medium",
     "large-v2": "medium",
     "large": "medium",
     "medium": "small",
@@ -302,6 +303,45 @@ class FasterWhisperService:
                 return model
             raise RuntimeError("Could not load a faster-whisper model.")
 
+    def load_transient_model(self, requested: str):
+        """Load a model for a single one-off job — never the shared cache.
+
+        The live pipeline's `_load_model` keeps whatever it loads for the
+        life of the process, which is right for `small`/`base`: every meeting
+        reuses them. A refinement pass loads something much bigger
+        (`large-v3-turbo`) once, rarely, and this machine cannot spare
+        1.5+ GB permanently for a model idle between refinements — that RAM
+        has to come back for live transcription. The caller must `del` the
+        returned model and run `gc.collect()` once done.
+
+        Returns (model, actual_size_loaded) — actual_size differs from
+        `requested` if it had to fall back for lack of RAM.
+        """
+        from faster_whisper import WhisperModel
+
+        threads = int(os.getenv("WHISPER_CPU_THREADS", "2"))
+        size = requested
+        tried: list[str] = []
+        while size and size not in tried:
+            tried.append(size)
+            with _MODEL_LOCK:
+                if size in _MODEL_CACHE:  # already resident for another reason — reuse it
+                    return _MODEL_CACHE[size], size
+            try:
+                logger.info("Loading faster-whisper model %r for a one-off job...", size)
+                model = WhisperModel(size, device="cpu", compute_type="int8", cpu_threads=threads)
+            except (RuntimeError, MemoryError, OSError) as error:
+                fallback = _MODEL_FALLBACKS.get(size)
+                if not fallback:
+                    raise RuntimeError(
+                        f"Could not load any faster-whisper model (last tried {size!r}): {error}"
+                    ) from error
+                logger.warning("Whisper model %r failed to load (%s) — trying %r.", size, error, fallback)
+                size = fallback
+                continue
+            return model, size
+        raise RuntimeError("Could not load a faster-whisper model.")
+
     def preload(self) -> None:
         """Load both models and run one throwaway pass, off the critical path.
 
@@ -348,8 +388,13 @@ class FasterWhisperService:
         """
         from faster_whisper.audio import decode_audio
 
+        return self.choose_language_for_audio(
+            decode_audio(str(audio_path), sampling_rate=16000), prefer
+        )
+
+    def choose_language_for_audio(self, audio, prefer: str | None = None) -> tuple[str, float]:  # noqa: ANN001
+        """`_choose_language` on samples already in memory (16 kHz float32)."""
         detector = self._load_model(self.english_model_size)  # the cheap model
-        audio = decode_audio(str(audio_path), sampling_rate=16000)
         _, _, probs = detector.detect_language(audio, language_detection_segments=1)
         p = dict(probs)
         p_en = p.get("en", 0.0)
@@ -405,16 +450,20 @@ class FasterWhisperService:
             logger.debug("Whisper transcribed a window in %.2fs (lang=%r).", elapsed, result.language)
         return result
 
-    def _decode(self, model, audio_path: Path, target: str):  # noqa: ANN001
-        """Run one Whisper decode and filter the result. Returns (segments, texts, info)."""
+    def _decode(self, model, audio_path, target: str, beam_size: int | None = None):  # noqa: ANN001
+        """Run one Whisper decode and filter the result. Returns (segments, texts, info).
+
+        `audio_path` may be a file path or 16 kHz float32 samples already in
+        memory (the refinement pass slices a long recording into blocks).
+        """
         raw_segments, info = model.transcribe(
-            str(audio_path),
+            audio_path if hasattr(audio_path, "shape") else str(audio_path),
             language=target,
             task="transcribe",  # never translate — Urdu must stay Urdu
             # Live transcription competes with real time, so beam width trades
             # accuracy for speed here. Override with WHISPER_BEAM_SIZE on a
             # bigger machine.
-            beam_size=_BEAM_SIZE,
+            beam_size=beam_size or _BEAM_SIZE,
             vad_filter=True,
             # Keep quiet/soft speech: the VAD's job here is only to drop dead
             # air between utterances, not to gate on loudness. A low speech

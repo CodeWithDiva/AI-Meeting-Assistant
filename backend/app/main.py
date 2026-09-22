@@ -28,6 +28,7 @@ from app.routers.meetings import router as meetings_router
 from app.routers.messages import dm_ws_manager, router as messages_router
 from app.routers.notifications import router as notifications_router
 from app.routers.recording import router as recording_router
+from app.routers.refine import router as refine_router
 from app.routers.search import router as search_router
 from app.routers.speakers import router as speakers_router
 from app.routers.tasks import router as tasks_router
@@ -98,6 +99,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(meetings_router)
 app.include_router(recording_router)
+app.include_router(refine_router)
 app.include_router(transcription_router)
 app.include_router(transcript_router)
 app.include_router(speakers_router)

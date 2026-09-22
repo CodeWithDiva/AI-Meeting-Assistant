@@ -16,6 +16,7 @@ import {
   MeetingDetail,
   MeetingInsights,
   Recording,
+  RefineStatus,
   Segment,
   Speaker,
   SystemCapabilities,
@@ -31,6 +32,8 @@ export default function MeetingDetailPage() {
 
   const [meeting, setMeeting] = useState<MeetingDetail | null>(null);
   const [recording, setRecording] = useState<Recording | null>(null);
+  const [refineStatus, setRefineStatus] = useState<RefineStatus | null>(null);
+  const [refining, setRefining] = useState(false);
   const [speakers, setSpeakers] = useState<Speaker[]>([]);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [caps, setCaps] = useState<SystemCapabilities | null>(null);
@@ -156,6 +159,17 @@ export default function MeetingDetailPage() {
             ]);
           } else if (message.event === "transcript_live") {
             setLiveTranscripts((prev) => [...prev, { speaker: payload.speaker || "Speaker", text: payload.text || "", timestamp: new Date().toLocaleTimeString() }]);
+          } else if (message.event === "refine_progress" || message.event === "refine_done") {
+            setRefineStatus(payload as RefineStatus);
+            if (message.event === "refine_done") {
+              setRefining(false);
+              if (payload.status === "done") {
+                setSuccess("Transcript accuracy improved — reloading notes.");
+                loadMeetingData();
+              } else if (payload.status === "failed") {
+                setError(payload.message || "Could not improve the transcript.");
+              }
+            }
           }
         } catch {}
       };
@@ -204,17 +218,22 @@ export default function MeetingDetailPage() {
     setLoading(true);
     setError("");
     try {
-      const [detail, recData, speakersData, agentData] = await Promise.all([
+      const [detail, recData, speakersData, agentData, refineData] = await Promise.all([
         api.getMeeting(meetingId),
         api.getRecording(meetingId).catch(() => null),
         api.getSpeakers(meetingId).catch(() => []),
         api.getAgentStatus(meetingId).catch(() => null),
+        api.getRefineStatus(meetingId).catch(() => null),
       ]);
 
       setMeeting(detail);
       setInsights(await api.getMeetingInsights(meetingId).catch(() => null));
       setRecording(recData);
       setSpeakers(speakersData);
+      if (refineData) {
+        setRefineStatus(refineData);
+        setRefining(refineData.status === "queued" || refineData.status === "running");
+      }
       if (agentData) {
         setAgentState(agentData.state || "idle");
         setAgentSimulated(agentData.simulated);
@@ -289,6 +308,18 @@ export default function MeetingDetailPage() {
       setSuccess(newEnabled ? "Recording enabled with consent tracking." : "Recording disabled (transcript only).");
     } catch (err: any) {
       setError(err?.message || "Failed to update recording settings");
+    }
+  }
+
+  async function handleRefine() {
+    setError("");
+    setRefining(true);
+    try {
+      const status = await api.startRefine(meetingId);
+      setRefineStatus(status);
+    } catch (err: any) {
+      setRefining(false);
+      setError(err?.message || "Could not start accuracy improvement.");
     }
   }
 
@@ -715,11 +746,42 @@ export default function MeetingDetailPage() {
                 <h3 style={{ fontSize: 16, marginBottom: 2 }}>Transcript timeline</h3>
                 <span style={{ fontSize: 12.5, color: "var(--text-muted)" }}>Timestamped, speaker-attributed segments</span>
               </div>
-              <div style={{ position: "relative" }}>
-                <input type="text" className="form-input" placeholder="Search transcript…" style={{ width: 220, paddingLeft: 32 }} value={transcriptSearch} onChange={(e) => setTranscriptSearch(e.target.value)} />
-                <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--text-dim)" }}><Icon name="search" size={13} /></span>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ position: "relative" }}>
+                  <input type="text" className="form-input" placeholder="Search transcript…" style={{ width: 220, paddingLeft: 32 }} value={transcriptSearch} onChange={(e) => setTranscriptSearch(e.target.value)} />
+                  <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--text-dim)" }}><Icon name="search" size={13} /></span>
+                </div>
+                {recording?.enabled && recording?.file_path ? (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={handleRefine}
+                    disabled={refining}
+                    title="Re-run the recording through a slower, more accurate model now that there's no live deadline"
+                  >
+                    <Icon name="refresh" size={13} />
+                    {refining
+                      ? `Improving… ${Math.round((refineStatus?.progress || 0) * 100)}%`
+                      : refineStatus?.status === "done"
+                        ? "Improve accuracy again"
+                        : "Improve accuracy"}
+                  </button>
+                ) : (
+                  <span title="Turn recording on before a meeting to unlock a high-accuracy re-transcription afterward" style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
+                    Enable recording to improve accuracy later
+                  </span>
+                )}
               </div>
             </div>
+            {refineStatus && (refineStatus.status === "running" || refineStatus.status === "queued") && (
+              <div style={{ marginBottom: 14, background: "var(--bg-subtle)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)", padding: "8px 14px", fontSize: 12, color: "var(--text-secondary)" }}>
+                {refineStatus.message || "Re-transcribing with a more accurate model…"} ({Math.round(refineStatus.progress * 100)}%)
+              </div>
+            )}
+            {refineStatus?.status === "failed" && (
+              <div className="alert-box alert-error" style={{ marginBottom: 14 }}>
+                <Icon name="alert" size={14} />{refineStatus.message || "Could not improve the transcript."}
+              </div>
+            )}
 
             {meeting.segments && meeting.segments.length > 0 ? (
               <div style={{ display: "grid", gap: 10, maxHeight: 520, overflowY: "auto", paddingRight: 6 }}>

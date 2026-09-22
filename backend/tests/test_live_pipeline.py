@@ -117,6 +117,38 @@ def test_a_pause_after_speech_ends_the_utterance(pipeline) -> None:
     assert windows[0] > MIN_UTTERANCE_MS / 1000
 
 
+def test_on_text_gets_a_wake_word_joined_with_the_question_from_the_same_window(
+    monkeypatch,
+) -> None:
+    """Whisper can split one utterance into two segments on the pause right
+    after a name ("Alina," | "deployment kab hai?"). Delivered separately to
+    the wake-word assistant, the first segment triggers "please repeat" and
+    the second is silently dropped (no wake word in it) — Alina looks like
+    she never answers. `on_text` must see the whole window joined, so the
+    wake word and the question always arrive together.
+    """
+    pipe = LiveMeetingPipeline(meeting_id=1)
+    said: list[str] = []
+
+    async def on_text(text: str) -> None:
+        said.append(text)
+
+    pipe._on_text = on_text
+
+    async def fake_transcribe(pcm_data, duration, start_at, speaker) -> list[str]:
+        return ["Alina,", "deployment kab hai?"]
+
+    monkeypatch.setattr(pipe, "_transcribe", fake_transcribe)
+
+    async def run() -> None:
+        pipe._ensure_worker()
+        pipe._work.put_nowait((_pcm(2_000), 2.0, 0.0, "Ali"))
+        await pipe._work.join()
+
+    asyncio.run(run())
+    assert said == ["Alina, deployment kab hai?"]
+
+
 def test_a_brief_noise_burst_is_not_transcribed(pipeline) -> None:
     pipe, windows, said = pipeline
 

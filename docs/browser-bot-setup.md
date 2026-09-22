@@ -99,6 +99,29 @@ ke baad wapas `small`. Zyada tez/accurate transcript ke liye zyada cores wali CP
 Meeting ke dauran heavy apps (bohot saare Chrome tabs) band rakhein: Whisper ko
 CPU aur RAM chahiye.
 
+**Meeting ke baad behtar accuracy (opt-in):** meeting shuru hone se pehle
+**Record: off/on** button se recording on karein (consent ke saath). Meeting
+khatam hone ke baad Transcript tab me **"Improve accuracy"** button dabayein —
+ye saari recording ko `large-v3-turbo` model se dobara sunta hai (koi live
+deadline nahi, isliye bada model afford ho jata hai) aur transcript + notes
+dono behtar bana deta hai. Isi hardware par naapa gaya (4 Urdu clips, saaf aur
+kharab dono audio): `small` avgWER 0.29-0.36, `medium` 0.15-0.17 (lekin bohot
+slow, 14.5x real-time), `large-v3-turbo` 0.09-0.10 aur sirf 2.5x real-time —
+donon lihaz se behtareen (kam decoder layers hone ki wajah se `large` se tez
+bhi hai). `.env` me `WHISPER_MODEL_REFINE` se badla ja sakta hai.
+
+**Alina ki Urdu awaaz (zaroori):** `pip install -r requirements.txt` se `edge-tts`
+bhi install hota hai — ye asal fix hai jo Urdu jawab ko sunne layak banata hai.
+Pehle wala `pyttsx3` sirf Windows ke installed SAPI5 voices use karta tha, jo
+is machine par sirf English/Korean hain, Urdu bilkul nahi — Urdu text bolne ki
+koshish khamoshi (46-byte silent WAV, naapa gaya) mein nikalti thi, aur Alina
+"jawab nahi de rahi" jaisi lagti thi. edge-tts ko sirf do cheezein chahiye:
+**internet** (meeting khud hi live web call hai, ye pehli cheez nahi jo internet
+maangegi) aur **ffmpeg PATH par** (mp3 se WAV banane ke liye — [ffmpeg.org](https://ffmpeg.org/download.html)
+se download kar ke `bin` folder PATH mein add karein). Ffmpeg na ho to
+khud-ba-khud `pyttsx3` (sirf English) par wapas chala jata hai — kabhi crash
+nahi hota.
+
 ## Step 6 — Agent chalayein
 
 1. Dashboard kholein.

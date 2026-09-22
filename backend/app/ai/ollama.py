@@ -255,6 +255,9 @@ def _snap_assigned_by(notes: dict[str, Any], roster: list[str] | None) -> None:
         giver = item.get("assigned_by")
         if not giver:
             continue
+        if giver.casefold() in {"speaker", "participant", "unknown"}:
+            item["assigned_by"] = None  # the pipeline's placeholder label, not a person
+            continue
         if _same_person(giver, item.get("assignee")):
             item["assigned_by"] = None  # "I will..." — nobody handed it to them
             continue

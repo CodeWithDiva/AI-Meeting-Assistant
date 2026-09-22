@@ -302,14 +302,22 @@ class LiveMeetingPipeline:
                 )
                 try:
                     texts = await self._transcribe(window, total, start_at, speaker)
-                    if self._on_text:
-                        for text in texts:
-                            try:
-                                await self._on_text(text)
-                            except Exception:
-                                logger.exception(
-                                    "on_text callback failed for meeting %d", self.meeting_id
-                                )
+                    if self._on_text and texts:
+                        # One call with the whole utterance joined, not one per
+                        # Whisper segment: Whisper's own VAD can split "Alina,
+                        # deployment kab hai?" into two segments on the pause
+                        # after the name. Per-segment delivery then hands the
+                        # wake-word assistant "Alina," alone (it answers "please
+                        # repeat") and separately "deployment kab hai?" (no wake
+                        # word, silently dropped) — the assistant looks like it
+                        # never replies. Joined, the wake word and the question
+                        # that follows always arrive together.
+                        try:
+                            await self._on_text(" ".join(texts))
+                        except Exception:
+                            logger.exception(
+                                "on_text callback failed for meeting %d", self.meeting_id
+                            )
                 except asyncio.CancelledError:
                     raise
                 except Exception:

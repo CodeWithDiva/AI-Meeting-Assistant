@@ -31,6 +31,13 @@ numpy>=1.26,<3.0
 # Text-to-speech for the assistant's in-meeting voice.
 # Piper (optional, higher quality) is configured via PIPER_PATH instead.
 pyttsx3>=2.90,<3.0
+# edge-tts: free neural voices (Microsoft), including a real Urdu voice —
+# pyttsx3 on Windows only ever has whatever SAPI5 voices are installed, which
+# is English-only on most machines (measured: 46-byte, silent WAV out of
+# pyttsx3 for Urdu text on this dev machine). Needs internet + ffmpeg on PATH
+# to convert its mp3 output to WAV; falls back to pyttsx3 when either is
+# unavailable, so it never breaks an offline run.
+edge-tts>=6.1,<8.0
 
 # WASAPI loopback capture for attach mode — records the meeting audio straight
 # off the speaker output, with no audio rerouting.

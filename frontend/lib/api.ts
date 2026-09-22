@@ -113,6 +113,16 @@ export interface Recording {
   created_at?: string | null;
 }
 
+/** Progress of the optional high-accuracy re-transcription pass (see refine.py). */
+export interface RefineStatus {
+  meeting_id: number;
+  status: "idle" | "queued" | "running" | "done" | "failed";
+  progress: number;
+  model: string;
+  message: string;
+  segments: number;
+}
+
 /** Lifecycle the agent reports, also pushed over WS as `agent_state`. */
 export type AgentState =
   | "idle"
@@ -631,6 +641,15 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ enabled }),
     });
+  },
+
+  // Transcript refinement (opt-in, requires a saved recording)
+  async startRefine(meetingId: number | string): Promise<RefineStatus> {
+    return apiRequest<RefineStatus>(`/api/meetings/${meetingId}/refine`, { method: "POST" });
+  },
+
+  async getRefineStatus(meetingId: number | string): Promise<RefineStatus> {
+    return apiRequest<RefineStatus>(`/api/meetings/${meetingId}/refine`);
   },
 
   // Speakers (Block 2)

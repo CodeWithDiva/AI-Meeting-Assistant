@@ -305,3 +305,27 @@ def test_nobody_is_recorded_as_having_assigned_a_task_to_themselves() -> None:
     ]}
     _snap_assigned_by(notes, ROSTER)
     assert [i["assigned_by"] for i in notes["action_items"]] == [None, "Sara"]
+
+
+def test_the_placeholder_speaker_label_is_not_recorded_as_a_person() -> None:
+    notes = {"action_items": [{"assignee": "Ali", "assigned_by": "Speaker", "task": "x"}]}
+    _snap_assigned_by(notes, ROSTER)
+    assert notes["action_items"][0]["assigned_by"] is None
+
+
+def test_an_empty_decisions_list_is_filled_from_spoken_markers() -> None:
+    from app.ai.service import _backfill_from_markers
+
+    notes = {"summary": "s", "decisions": [], "action_items": [{"assignee": "Ali", "task": "x"}]}
+    _backfill_from_markers(notes, "[Sara]: ہم نے فیصلہ کیا ہے کہ ڈیپلامنٹ پیر کو ہوگی", ROSTER)
+    assert len(notes["decisions"]) == 1 and "فیصلہ" in notes["decisions"][0]
+    assert notes["action_items"] == [{"assignee": "Ali", "task": "x"}]  # untouched
+
+
+def test_backfill_never_overrides_what_the_model_returned() -> None:
+    from app.ai.service import _backfill_from_markers
+
+    notes = {"summary": "s", "decisions": ["Deploy Monday"], "action_items": [{"assignee": "Ali", "task": "x"}]}
+    _backfill_from_markers(notes, "[Sara]: We decided to ship. Tasmia will test it.", ROSTER)
+    assert notes["decisions"] == ["Deploy Monday"]
+    assert len(notes["action_items"]) == 1
