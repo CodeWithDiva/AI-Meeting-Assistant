@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, Segment } from "@/lib/api";
+import { DEMO_MODE } from "@/lib/demo";
 import Icon from "./Icon";
 
 interface LiveRecorderProps {
@@ -31,6 +32,10 @@ export default function LiveRecorder({
   }, []);
 
   async function startRecording() {
+    if (DEMO_MODE) {
+      setLiveStatus("Live transcription runs on the assistant's local backend, so it is off in this demo.");
+      return;
+    }
     try {
       setLiveStatus("Requesting microphone permission...");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });

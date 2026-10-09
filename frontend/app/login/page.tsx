@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { DEMO_EMAIL, DEMO_MODE, DEMO_PASSWORD } from "@/lib/demo";
 import Icon from "@/app/components/Icon";
 import Waveform from "@/app/components/Waveform";
 
@@ -10,8 +11,8 @@ export default function LoginPage() {
   const router = useRouter();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [fullName, setFullName] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [email, setEmail] = useState(DEMO_MODE ? DEMO_EMAIL : "");
+  const [password, setPassword] = useState(DEMO_MODE ? DEMO_PASSWORD : "");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [successMsg, setSuccessMsg] = useState("");
@@ -72,6 +73,9 @@ export default function LoginPage() {
           <button type="button" className={`btn btn-sm ${mode === "register" ? "btn-primary" : "btn-ghost"}`} onClick={() => { setMode("register"); setError(""); setSuccessMsg(""); }}>Register</button>
         </div>
 
+        {DEMO_MODE && (
+          <div className="alert-box alert-success"><Icon name="check" size={15} />Demo workspace with sample data. Just press Sign in.</div>
+        )}
         {error && <div className="alert-box alert-error"><Icon name="alert" size={15} />{error}</div>}
         {successMsg && <div className="alert-box alert-success"><Icon name="check" size={15} />{successMsg}</div>}
 

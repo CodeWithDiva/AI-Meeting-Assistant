@@ -1,0 +1,1193 @@
+{
+ "login": {
+  "access_token": "demo-token",
+  "token_type": "bearer",
+  "user": {
+   "id": 1,
+   "email": "ayesha@nexora-demo.com",
+   "full_name": "Ayesha Khan",
+   "role": "admin",
+   "created_at": "2026-10-09T06:53:56"
+  }
+ },
+ "/api/auth/setup-status": {
+  "needs_setup": false
+ },
+ "/api/auth/me": {
+  "id": 1,
+  "email": "ayesha@nexora-demo.com",
+  "full_name": "Ayesha Khan",
+  "role": "admin",
+  "created_at": "2026-10-09T06:53:56"
+ },
+ "/api/auth/users": [
+  {
+   "id": 1,
+   "email": "ayesha@nexora-demo.com",
+   "full_name": "Ayesha Khan",
+   "role": "admin"
+  },
+  {
+   "id": 2,
+   "email": "bilal@nexora-demo.com",
+   "full_name": "Bilal Ahmed",
+   "role": "employee"
+  },
+  {
+   "id": 3,
+   "email": "sara@nexora-demo.com",
+   "full_name": "Sara Malik",
+   "role": "employee"
+  },
+  {
+   "id": 4,
+   "email": "usman@nexora-demo.com",
+   "full_name": "Usman Tariq",
+   "role": "employee"
+  }
+ ],
+ "/api/meetings": [
+  {
+   "id": 1,
+   "title": "Sprint Planning — Q4 Release",
+   "platform": "zoom",
+   "transcript": "Ayesha Khan: Let's start with the release status. Bilal, how is the payment gateway?\nBilal Ahmed: Integration is done, testing needs two more days. Main Wednesday tak complete kar doon ga.\nSara Malik: I can prepare the release notes by Thursday.\nAyesha Khan: Great. Feature freeze Friday se start hoga, after that only bug fixes.\nUsman Tariq: The product page images are slow, I'll fix that before Friday.",
+   "scheduled_at": "2026-10-08T06:53:56.481941",
+   "ended_at": "2026-10-08T07:35:56.481941",
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 2,
+   "title": "Client Review — Website Redesign",
+   "platform": "google_meet",
+   "transcript": "Ayesha Khan: Thank you for joining. Let's review the homepage first.\nSara Malik: We updated the hero section based on your feedback.",
+   "scheduled_at": "2026-10-06T06:53:56.481941",
+   "ended_at": "2026-10-06T07:28:56.481941",
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 3,
+   "title": "Weekly Team Sync",
+   "platform": "zoom",
+   "transcript": "Ayesha Khan: Is hafte ka update dete hain.\nBilal Ahmed: Proposal ready hai, Monday ko bhej doon ga.",
+   "scheduled_at": "2026-10-03T06:53:56.481941",
+   "ended_at": "2026-10-03T07:21:56.481941",
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  }
+ ],
+ "/api/tasks": [
+  {
+   "id": 7,
+   "meeting_id": 3,
+   "meeting_title": "Weekly Team Sync",
+   "assignee": "Bilal Ahmed",
+   "assignee_user_id": 2,
+   "assignee_email": "bilal@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Send the proposal to the new client",
+   "deadline": "Monday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "medium",
+   "status": "done",
+   "is_overdue": false,
+   "completed_at": "2026-10-09T10:06:57",
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 6,
+   "meeting_id": 2,
+   "meeting_title": "Client Review — Website Redesign",
+   "assignee": "Usman Tariq",
+   "assignee_user_id": 4,
+   "assignee_email": "usman@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Add client testimonials section",
+   "deadline": "Next Tuesday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "low",
+   "status": "pending",
+   "is_overdue": false,
+   "completed_at": null,
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 5,
+   "meeting_id": 2,
+   "meeting_title": "Client Review — Website Redesign",
+   "assignee": "Sara Malik",
+   "assignee_user_id": 3,
+   "assignee_email": "sara@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Update services page to the dark theme",
+   "deadline": "Next Monday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "medium",
+   "status": "pending",
+   "is_overdue": false,
+   "completed_at": null,
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 4,
+   "meeting_id": 1,
+   "meeting_title": "Sprint Planning — Q4 Release",
+   "assignee": "Ayesha Khan",
+   "assignee_user_id": 1,
+   "assignee_email": "ayesha@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Share the launch plan with the client",
+   "deadline": "Today",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "medium",
+   "status": "done",
+   "is_overdue": false,
+   "completed_at": "2026-10-09T10:06:57",
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 3,
+   "meeting_id": 1,
+   "meeting_title": "Sprint Planning — Q4 Release",
+   "assignee": "Usman Tariq",
+   "assignee_user_id": 4,
+   "assignee_email": "usman@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Fix image loading performance on the product page",
+   "deadline": "Friday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "high",
+   "status": "pending",
+   "is_overdue": false,
+   "completed_at": null,
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 2,
+   "meeting_id": 1,
+   "meeting_title": "Sprint Planning — Q4 Release",
+   "assignee": "Sara Malik",
+   "assignee_user_id": 3,
+   "assignee_email": "sara@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Prepare release notes and changelog",
+   "deadline": "Thursday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "medium",
+   "status": "pending",
+   "is_overdue": false,
+   "completed_at": null,
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 1,
+   "meeting_id": 1,
+   "meeting_title": "Sprint Planning — Q4 Release",
+   "assignee": "Bilal Ahmed",
+   "assignee_user_id": 2,
+   "assignee_email": "bilal@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Finish payment gateway integration tests",
+   "deadline": "Wednesday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "high",
+   "status": "in_progress",
+   "is_overdue": false,
+   "completed_at": null,
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  }
+ ],
+ "/api/tasks/dashboard/stats": {
+  "total_meetings": 3,
+  "total_tasks": 7,
+  "pending_tasks": 4,
+  "in_progress_tasks": 1,
+  "done_tasks": 2,
+  "recent_meetings": 3,
+  "overdue_tasks": 0,
+  "due_soon_tasks": 0,
+  "my_open_tasks": 0,
+  "completion_rate": 28.6
+ },
+ "/api/agent/sessions": [],
+ "/api/system/capabilities": {
+  "assistant_name": "Alina",
+  "wake_word": "alina",
+  "email_notifications": false,
+  "virtual_microphone": true,
+  "platforms": [
+   "zoom",
+   "google_meet"
+  ],
+  "browser_automation": true,
+  "audio_devices": true,
+  "transcription": true,
+  "whisper_model": "small",
+  "llm_model": "qwen2.5:7b",
+  "tts": true
+ },
+ "/api/notifications": [
+  {
+   "id": 4,
+   "user_id": 1,
+   "meeting_id": 1,
+   "type": "task_assigned",
+   "title": "New task: Share the launch plan with the client",
+   "body": "From Sprint Planning — Q4 Release",
+   "read": false,
+   "created_at": "2026-10-09T06:53:56"
+  }
+ ],
+ "/api/notifications/unread-count": {
+  "unread": 1
+ },
+ "/api/auth/admin/users": [
+  {
+   "id": 1,
+   "email": "ayesha@nexora-demo.com",
+   "full_name": "Ayesha Khan",
+   "role": "admin",
+   "status": "active",
+   "created_at": "2026-10-09T06:53:56",
+   "meeting_count": 3,
+   "task_count": 1,
+   "open_tasks": 0,
+   "overdue_tasks": 0,
+   "done_tasks": 1
+  },
+  {
+   "id": 2,
+   "email": "bilal@nexora-demo.com",
+   "full_name": "Bilal Ahmed",
+   "role": "employee",
+   "status": "active",
+   "created_at": "2026-10-09T06:53:56",
+   "meeting_count": 0,
+   "task_count": 2,
+   "open_tasks": 1,
+   "overdue_tasks": 0,
+   "done_tasks": 1
+  },
+  {
+   "id": 3,
+   "email": "sara@nexora-demo.com",
+   "full_name": "Sara Malik",
+   "role": "employee",
+   "status": "active",
+   "created_at": "2026-10-09T06:53:56",
+   "meeting_count": 0,
+   "task_count": 2,
+   "open_tasks": 2,
+   "overdue_tasks": 0,
+   "done_tasks": 0
+  },
+  {
+   "id": 4,
+   "email": "usman@nexora-demo.com",
+   "full_name": "Usman Tariq",
+   "role": "employee",
+   "status": "active",
+   "created_at": "2026-10-09T06:53:56",
+   "meeting_count": 0,
+   "task_count": 2,
+   "open_tasks": 2,
+   "overdue_tasks": 0,
+   "done_tasks": 0
+  }
+ ],
+ "/api/admin/analytics": {
+  "totals": {
+   "members": 4,
+   "meetings": 3,
+   "meetings_this_week": 3,
+   "tasks": 7,
+   "open_tasks": 5,
+   "overdue_tasks": 0,
+   "unassigned_open_tasks": 0,
+   "completion_rate": 28.6
+  },
+  "status_counts": {
+   "pending": 4,
+   "in_progress": 1,
+   "done": 2
+  },
+  "weeks": [
+   {
+    "week_start": "2026-08-17",
+    "meetings": 0,
+    "tasks_created": 0,
+    "tasks_completed": 0
+   },
+   {
+    "week_start": "2026-08-24",
+    "meetings": 0,
+    "tasks_created": 0,
+    "tasks_completed": 0
+   },
+   {
+    "week_start": "2026-08-31",
+    "meetings": 0,
+    "tasks_created": 0,
+    "tasks_completed": 0
+   },
+   {
+    "week_start": "2026-09-07",
+    "meetings": 0,
+    "tasks_created": 0,
+    "tasks_completed": 0
+   },
+   {
+    "week_start": "2026-09-14",
+    "meetings": 0,
+    "tasks_created": 0,
+    "tasks_completed": 0
+   },
+   {
+    "week_start": "2026-09-21",
+    "meetings": 0,
+    "tasks_created": 0,
+    "tasks_completed": 0
+   },
+   {
+    "week_start": "2026-09-28",
+    "meetings": 0,
+    "tasks_created": 0,
+    "tasks_completed": 0
+   },
+   {
+    "week_start": "2026-10-05",
+    "meetings": 3,
+    "tasks_created": 7,
+    "tasks_completed": 2
+   }
+  ],
+  "workload": [
+   {
+    "user_id": 3,
+    "name": "Sara Malik",
+    "email": "sara@nexora-demo.com",
+    "role": "employee",
+    "meetings_owned": 0,
+    "assigned": 2,
+    "open": 2,
+    "overdue": 0,
+    "done": 0,
+    "completion_rate": 0
+   },
+   {
+    "user_id": 4,
+    "name": "Usman Tariq",
+    "email": "usman@nexora-demo.com",
+    "role": "employee",
+    "meetings_owned": 0,
+    "assigned": 2,
+    "open": 2,
+    "overdue": 0,
+    "done": 0,
+    "completion_rate": 0
+   },
+   {
+    "user_id": 2,
+    "name": "Bilal Ahmed",
+    "email": "bilal@nexora-demo.com",
+    "role": "employee",
+    "meetings_owned": 0,
+    "assigned": 2,
+    "open": 1,
+    "overdue": 0,
+    "done": 1,
+    "completion_rate": 50
+   },
+   {
+    "user_id": 1,
+    "name": "Ayesha Khan",
+    "email": "ayesha@nexora-demo.com",
+    "role": "admin",
+    "meetings_owned": 3,
+    "assigned": 1,
+    "open": 0,
+    "overdue": 0,
+    "done": 1,
+    "completion_rate": 100
+   }
+  ],
+  "overdue": []
+ },
+ "/api/messages/conversations": [
+  {
+   "user": {
+    "id": 3,
+    "full_name": "Sara Malik",
+    "email": "sara@nexora-demo.com",
+    "role": "employee"
+   },
+   "last_message": {
+    "id": 4,
+    "sender_id": 1,
+    "recipient_id": 3,
+    "body": "Thanks Sara, I will review it today.",
+    "read_at": null,
+    "created_at": "2026-10-09T08:58:11"
+   },
+   "unread_count": 0
+  },
+  {
+   "user": {
+    "id": 2,
+    "full_name": "Bilal Ahmed",
+    "email": "bilal@nexora-demo.com",
+    "role": "employee"
+   },
+   "last_message": {
+    "id": 2,
+    "sender_id": 1,
+    "recipient_id": 2,
+    "body": "Great, thanks Bilal. Let me know if you need help.",
+    "read_at": null,
+    "created_at": "2026-10-09T05:58:11"
+   },
+   "unread_count": 0
+  }
+ ],
+ "/api/messages/unread-count": {
+  "unread": 0
+ },
+ "/api/messages/thread/2": [
+  {
+   "id": 1,
+   "sender_id": 2,
+   "recipient_id": 1,
+   "body": "Payment gateway tests are 70% done, should finish by Wednesday.",
+   "read_at": "2026-10-09T09:58:39.387218",
+   "created_at": "2026-10-09T04:58:11"
+  },
+  {
+   "id": 2,
+   "sender_id": 1,
+   "recipient_id": 2,
+   "body": "Great, thanks Bilal. Let me know if you need help.",
+   "read_at": null,
+   "created_at": "2026-10-09T05:58:11"
+  }
+ ],
+ "/api/messages/thread/3": [
+  {
+   "id": 3,
+   "sender_id": 3,
+   "recipient_id": 1,
+   "body": "Release notes draft is ready for review.",
+   "read_at": "2026-10-09T09:58:39.408012",
+   "created_at": "2026-10-09T07:58:11"
+  },
+  {
+   "id": 4,
+   "sender_id": 1,
+   "recipient_id": 3,
+   "body": "Thanks Sara, I will review it today.",
+   "read_at": null,
+   "created_at": "2026-10-09T08:58:11"
+  }
+ ],
+ "/api/messages/thread/4": [],
+ "/api/meetings/1": {
+  "id": 1,
+  "title": "Sprint Planning — Q4 Release",
+  "platform": "zoom",
+  "transcript": "Ayesha Khan: Let's start with the release status. Bilal, how is the payment gateway?\nBilal Ahmed: Integration is done, testing needs two more days. Main Wednesday tak complete kar doon ga.\nSara Malik: I can prepare the release notes by Thursday.\nAyesha Khan: Great. Feature freeze Friday se start hoga, after that only bug fixes.\nUsman Tariq: The product page images are slow, I'll fix that before Friday.",
+  "scheduled_at": "2026-10-08T06:53:56.481941",
+  "ended_at": "2026-10-08T07:35:56.481941",
+  "created_at": "2026-10-09T06:53:56",
+  "updated_at": "2026-10-09T06:53:56",
+  "summary": {
+   "id": 1,
+   "text": "The team reviewed progress on the Q4 release. The mobile checkout redesign is on track, but payment gateway testing needs two more days. The team agreed to freeze new features on Friday and focus on bug fixes and performance before launch.",
+   "provider": "ollama",
+   "generated_at": "2026-10-09T06:53:56"
+  },
+  "decisions": [
+   {
+    "id": 1,
+    "text": "Feature freeze starts this Friday"
+   },
+   {
+    "id": 2,
+    "text": "Release date stays at 20 October"
+   },
+   {
+    "id": 3,
+    "text": "Payment gateway goes through a full QA pass before launch"
+   }
+  ],
+  "action_items": [
+   {
+    "id": 1,
+    "meeting_id": 1,
+    "assignee": "Bilal Ahmed",
+    "assignee_user_id": 2,
+    "assigned_by": "Ayesha Khan",
+    "task": "Finish payment gateway integration tests",
+    "deadline": "Wednesday",
+    "due_at": "2026-10-12T06:53:56.481941",
+    "priority": "high",
+    "status": "in_progress"
+   },
+   {
+    "id": 2,
+    "meeting_id": 1,
+    "assignee": "Sara Malik",
+    "assignee_user_id": 3,
+    "assigned_by": "Ayesha Khan",
+    "task": "Prepare release notes and changelog",
+    "deadline": "Thursday",
+    "due_at": "2026-10-12T06:53:56.481941",
+    "priority": "medium",
+    "status": "pending"
+   },
+   {
+    "id": 3,
+    "meeting_id": 1,
+    "assignee": "Usman Tariq",
+    "assignee_user_id": 4,
+    "assigned_by": "Ayesha Khan",
+    "task": "Fix image loading performance on the product page",
+    "deadline": "Friday",
+    "due_at": "2026-10-12T06:53:56.481941",
+    "priority": "high",
+    "status": "pending"
+   },
+   {
+    "id": 4,
+    "meeting_id": 1,
+    "assignee": "Ayesha Khan",
+    "assignee_user_id": 1,
+    "assigned_by": "Ayesha Khan",
+    "task": "Share the launch plan with the client",
+    "deadline": "Today",
+    "due_at": "2026-10-12T06:53:56.481941",
+    "priority": "medium",
+    "status": "done"
+   }
+  ],
+  "segments": [
+   {
+    "id": 1,
+    "speaker_label": "Ayesha Khan",
+    "text": "Let's start with the release status. Bilal, how is the payment gateway?",
+    "start_time": 0,
+    "end_time": 6
+   },
+   {
+    "id": 2,
+    "speaker_label": "Bilal Ahmed",
+    "text": "Integration is done, testing needs two more days. Main Wednesday tak complete kar doon ga.",
+    "start_time": 7,
+    "end_time": 13
+   },
+   {
+    "id": 3,
+    "speaker_label": "Sara Malik",
+    "text": "I can prepare the release notes by Thursday.",
+    "start_time": 14,
+    "end_time": 20
+   },
+   {
+    "id": 4,
+    "speaker_label": "Ayesha Khan",
+    "text": "Great. Feature freeze Friday se start hoga, after that only bug fixes.",
+    "start_time": 21,
+    "end_time": 27
+   },
+   {
+    "id": 5,
+    "speaker_label": "Usman Tariq",
+    "text": "The product page images are slow, I'll fix that before Friday.",
+    "start_time": 28,
+    "end_time": 34
+   }
+  ]
+ },
+ "/api/meetings/1/insights": {
+  "meeting_id": 1,
+  "participants": [
+   {
+    "speaker": "Ayesha Khan",
+    "talk_time_seconds": 12,
+    "talk_time_percent": 40,
+    "engagement_score": 44,
+    "coaching_tip": "Good balance. Keep contributing concise, clear updates."
+   },
+   {
+    "speaker": "Bilal Ahmed",
+    "talk_time_seconds": 6,
+    "talk_time_percent": 20,
+    "engagement_score": 22,
+    "coaching_tip": "Good balance. Keep contributing concise, clear updates."
+   },
+   {
+    "speaker": "Sara Malik",
+    "talk_time_seconds": 6,
+    "talk_time_percent": 20,
+    "engagement_score": 22,
+    "coaching_tip": "Good balance. Keep contributing concise, clear updates."
+   },
+   {
+    "speaker": "Usman Tariq",
+    "talk_time_seconds": 6,
+    "talk_time_percent": 20,
+    "engagement_score": 22,
+    "coaching_tip": "Good balance. Keep contributing concise, clear updates."
+   }
+  ],
+  "sentiment": null
+ },
+ "/api/transcript/1": {
+  "meeting_id": 1,
+  "total_segments": 5,
+  "segments": [
+   {
+    "id": 1,
+    "speaker_label": "Ayesha Khan",
+    "text": "Let's start with the release status. Bilal, how is the payment gateway?",
+    "start_time": 0,
+    "end_time": 6,
+    "source": "live",
+    "created_at": "2026-10-09T06:53:56"
+   },
+   {
+    "id": 2,
+    "speaker_label": "Bilal Ahmed",
+    "text": "Integration is done, testing needs two more days. Main Wednesday tak complete kar doon ga.",
+    "start_time": 7,
+    "end_time": 13,
+    "source": "live",
+    "created_at": "2026-10-09T06:53:56"
+   },
+   {
+    "id": 3,
+    "speaker_label": "Sara Malik",
+    "text": "I can prepare the release notes by Thursday.",
+    "start_time": 14,
+    "end_time": 20,
+    "source": "live",
+    "created_at": "2026-10-09T06:53:56"
+   },
+   {
+    "id": 4,
+    "speaker_label": "Ayesha Khan",
+    "text": "Great. Feature freeze Friday se start hoga, after that only bug fixes.",
+    "start_time": 21,
+    "end_time": 27,
+    "source": "live",
+    "created_at": "2026-10-09T06:53:56"
+   },
+   {
+    "id": 5,
+    "speaker_label": "Usman Tariq",
+    "text": "The product page images are slow, I'll fix that before Friday.",
+    "start_time": 28,
+    "end_time": 34,
+    "source": "live",
+    "created_at": "2026-10-09T06:53:56"
+   }
+  ]
+ },
+ "/api/tasks/meeting/1": [
+  {
+   "id": 4,
+   "meeting_id": 1,
+   "meeting_title": "Sprint Planning — Q4 Release",
+   "assignee": "Ayesha Khan",
+   "assignee_user_id": 1,
+   "assignee_email": "ayesha@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Share the launch plan with the client",
+   "deadline": "Today",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "medium",
+   "status": "done",
+   "is_overdue": false,
+   "completed_at": "2026-10-09T10:06:57",
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 3,
+   "meeting_id": 1,
+   "meeting_title": "Sprint Planning — Q4 Release",
+   "assignee": "Usman Tariq",
+   "assignee_user_id": 4,
+   "assignee_email": "usman@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Fix image loading performance on the product page",
+   "deadline": "Friday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "high",
+   "status": "pending",
+   "is_overdue": false,
+   "completed_at": null,
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 2,
+   "meeting_id": 1,
+   "meeting_title": "Sprint Planning — Q4 Release",
+   "assignee": "Sara Malik",
+   "assignee_user_id": 3,
+   "assignee_email": "sara@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Prepare release notes and changelog",
+   "deadline": "Thursday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "medium",
+   "status": "pending",
+   "is_overdue": false,
+   "completed_at": null,
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 1,
+   "meeting_id": 1,
+   "meeting_title": "Sprint Planning — Q4 Release",
+   "assignee": "Bilal Ahmed",
+   "assignee_user_id": 2,
+   "assignee_email": "bilal@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Finish payment gateway integration tests",
+   "deadline": "Wednesday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "high",
+   "status": "in_progress",
+   "is_overdue": false,
+   "completed_at": null,
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  }
+ ],
+ "/api/meetings/1/recording": {
+  "id": 1,
+  "meeting_id": 1,
+  "enabled": false,
+  "consent_given_at": null,
+  "file_path": null,
+  "file_size_bytes": null,
+  "created_at": "2026-10-09T06:56:06"
+ },
+ "/api/meetings/1/refine": {
+  "meeting_id": 1,
+  "status": "idle",
+  "progress": 0,
+  "model": "",
+  "message": "",
+  "segments": 0
+ },
+ "/api/meetings/1/speakers": [
+  {
+   "id": 1,
+   "meeting_id": 1,
+   "speaker_label": "Ayesha Khan",
+   "display_name": "Ayesha Khan"
+  },
+  {
+   "id": 2,
+   "meeting_id": 1,
+   "speaker_label": "Bilal Ahmed",
+   "display_name": "Bilal Ahmed"
+  },
+  {
+   "id": 3,
+   "meeting_id": 1,
+   "speaker_label": "Sara Malik",
+   "display_name": "Sara Malik"
+  },
+  {
+   "id": 4,
+   "meeting_id": 1,
+   "speaker_label": "Usman Tariq",
+   "display_name": "Usman Tariq"
+  }
+ ],
+ "/api/agent/status/1": {
+  "meeting_id": 1,
+  "state": "COMPLETE",
+  "platform": "zoom",
+  "is_connected": false,
+  "simulated": false,
+  "active_speaker": null,
+  "participants": [],
+  "error": null,
+  "mic_captured": null
+ },
+ "/api/meetings/1/voice-reply/latest": {
+  "meeting_id": 1,
+  "reply": null
+ },
+ "/api/meetings/2": {
+  "id": 2,
+  "title": "Client Review — Website Redesign",
+  "platform": "google_meet",
+  "transcript": "Ayesha Khan: Thank you for joining. Let's review the homepage first.\nSara Malik: We updated the hero section based on your feedback.",
+  "scheduled_at": "2026-10-06T06:53:56.481941",
+  "ended_at": "2026-10-06T07:28:56.481941",
+  "created_at": "2026-10-09T06:53:56",
+  "updated_at": "2026-10-09T06:53:56",
+  "summary": {
+   "id": 2,
+   "text": "The client approved the new homepage design and asked for a darker colour theme on the services page. Content for the About page will be shared by the client this week.",
+   "provider": "ollama",
+   "generated_at": "2026-10-09T06:53:56"
+  },
+  "decisions": [
+   {
+    "id": 4,
+    "text": "Homepage design approved by the client"
+   },
+   {
+    "id": 5,
+    "text": "Services page moves to the dark theme"
+   }
+  ],
+  "action_items": [
+   {
+    "id": 5,
+    "meeting_id": 2,
+    "assignee": "Sara Malik",
+    "assignee_user_id": 3,
+    "assigned_by": "Ayesha Khan",
+    "task": "Update services page to the dark theme",
+    "deadline": "Next Monday",
+    "due_at": "2026-10-12T06:53:56.481941",
+    "priority": "medium",
+    "status": "pending"
+   },
+   {
+    "id": 6,
+    "meeting_id": 2,
+    "assignee": "Usman Tariq",
+    "assignee_user_id": 4,
+    "assigned_by": "Ayesha Khan",
+    "task": "Add client testimonials section",
+    "deadline": "Next Tuesday",
+    "due_at": "2026-10-12T06:53:56.481941",
+    "priority": "low",
+    "status": "pending"
+   }
+  ],
+  "segments": [
+   {
+    "id": 6,
+    "speaker_label": "Ayesha Khan",
+    "text": "Thank you for joining. Let's review the homepage first.",
+    "start_time": 0,
+    "end_time": 6
+   },
+   {
+    "id": 7,
+    "speaker_label": "Sara Malik",
+    "text": "We updated the hero section based on your feedback.",
+    "start_time": 7,
+    "end_time": 13
+   }
+  ]
+ },
+ "/api/meetings/2/insights": {
+  "meeting_id": 2,
+  "participants": [
+   {
+    "speaker": "Ayesha Khan",
+    "talk_time_seconds": 6,
+    "talk_time_percent": 50,
+    "engagement_score": 52,
+    "coaching_tip": "Good balance. Keep contributing concise, clear updates."
+   },
+   {
+    "speaker": "Sara Malik",
+    "talk_time_seconds": 6,
+    "talk_time_percent": 50,
+    "engagement_score": 52,
+    "coaching_tip": "Good balance. Keep contributing concise, clear updates."
+   }
+  ],
+  "sentiment": null
+ },
+ "/api/transcript/2": {
+  "meeting_id": 2,
+  "total_segments": 2,
+  "segments": [
+   {
+    "id": 6,
+    "speaker_label": "Ayesha Khan",
+    "text": "Thank you for joining. Let's review the homepage first.",
+    "start_time": 0,
+    "end_time": 6,
+    "source": "live",
+    "created_at": "2026-10-09T06:53:56"
+   },
+   {
+    "id": 7,
+    "speaker_label": "Sara Malik",
+    "text": "We updated the hero section based on your feedback.",
+    "start_time": 7,
+    "end_time": 13,
+    "source": "live",
+    "created_at": "2026-10-09T06:53:56"
+   }
+  ]
+ },
+ "/api/tasks/meeting/2": [
+  {
+   "id": 6,
+   "meeting_id": 2,
+   "meeting_title": "Client Review — Website Redesign",
+   "assignee": "Usman Tariq",
+   "assignee_user_id": 4,
+   "assignee_email": "usman@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Add client testimonials section",
+   "deadline": "Next Tuesday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "low",
+   "status": "pending",
+   "is_overdue": false,
+   "completed_at": null,
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  },
+  {
+   "id": 5,
+   "meeting_id": 2,
+   "meeting_title": "Client Review — Website Redesign",
+   "assignee": "Sara Malik",
+   "assignee_user_id": 3,
+   "assignee_email": "sara@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Update services page to the dark theme",
+   "deadline": "Next Monday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "medium",
+   "status": "pending",
+   "is_overdue": false,
+   "completed_at": null,
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  }
+ ],
+ "/api/meetings/2/recording": {
+  "id": 2,
+  "meeting_id": 2,
+  "enabled": false,
+  "consent_given_at": null,
+  "file_path": null,
+  "file_size_bytes": null,
+  "created_at": "2026-10-09T09:58:39"
+ },
+ "/api/meetings/2/refine": {
+  "meeting_id": 2,
+  "status": "idle",
+  "progress": 0,
+  "model": "",
+  "message": "",
+  "segments": 0
+ },
+ "/api/meetings/2/speakers": [
+  {
+   "id": 5,
+   "meeting_id": 2,
+   "speaker_label": "Ayesha Khan",
+   "display_name": "Ayesha Khan"
+  },
+  {
+   "id": 6,
+   "meeting_id": 2,
+   "speaker_label": "Sara Malik",
+   "display_name": "Sara Malik"
+  }
+ ],
+ "/api/agent/status/2": {
+  "meeting_id": 2,
+  "state": "COMPLETE",
+  "platform": "google_meet",
+  "is_connected": false,
+  "simulated": false,
+  "active_speaker": null,
+  "participants": [],
+  "error": null,
+  "mic_captured": null
+ },
+ "/api/meetings/2/voice-reply/latest": {
+  "meeting_id": 2,
+  "reply": null
+ },
+ "/api/meetings/3": {
+  "id": 3,
+  "title": "Weekly Team Sync",
+  "platform": "zoom",
+  "transcript": "Ayesha Khan: Is hafte ka update dete hain.\nBilal Ahmed: Proposal ready hai, Monday ko bhej doon ga.",
+  "scheduled_at": "2026-10-03T06:53:56.481941",
+  "ended_at": "2026-10-03T07:21:56.481941",
+  "created_at": "2026-10-09T06:53:56",
+  "updated_at": "2026-10-09T06:53:56",
+  "summary": {
+   "id": 3,
+   "text": "ٹیم نے اس ہفتے کی پیش رفت کا جائزہ لیا۔ نئے کلائنٹ کے لیے پروپوزل تیار ہے اور اگلے ہفتے بھیجا جائے گا۔",
+   "provider": "ollama",
+   "generated_at": "2026-10-09T06:53:56"
+  },
+  "decisions": [
+   {
+    "id": 6,
+    "text": "نیا پروپوزل پیر کو بھیجا جائے گا"
+   }
+  ],
+  "action_items": [
+   {
+    "id": 7,
+    "meeting_id": 3,
+    "assignee": "Bilal Ahmed",
+    "assignee_user_id": 2,
+    "assigned_by": "Ayesha Khan",
+    "task": "Send the proposal to the new client",
+    "deadline": "Monday",
+    "due_at": "2026-10-12T06:53:56.481941",
+    "priority": "medium",
+    "status": "done"
+   }
+  ],
+  "segments": [
+   {
+    "id": 8,
+    "speaker_label": "Ayesha Khan",
+    "text": "Is hafte ka update dete hain.",
+    "start_time": 0,
+    "end_time": 6
+   },
+   {
+    "id": 9,
+    "speaker_label": "Bilal Ahmed",
+    "text": "Proposal ready hai, Monday ko bhej doon ga.",
+    "start_time": 7,
+    "end_time": 13
+   }
+  ]
+ },
+ "/api/meetings/3/insights": {
+  "meeting_id": 3,
+  "participants": [
+   {
+    "speaker": "Ayesha Khan",
+    "talk_time_seconds": 6,
+    "talk_time_percent": 50,
+    "engagement_score": 52,
+    "coaching_tip": "Good balance. Keep contributing concise, clear updates."
+   },
+   {
+    "speaker": "Bilal Ahmed",
+    "talk_time_seconds": 6,
+    "talk_time_percent": 50,
+    "engagement_score": 52,
+    "coaching_tip": "Good balance. Keep contributing concise, clear updates."
+   }
+  ],
+  "sentiment": null
+ },
+ "/api/transcript/3": {
+  "meeting_id": 3,
+  "total_segments": 2,
+  "segments": [
+   {
+    "id": 8,
+    "speaker_label": "Ayesha Khan",
+    "text": "Is hafte ka update dete hain.",
+    "start_time": 0,
+    "end_time": 6,
+    "source": "live",
+    "created_at": "2026-10-09T06:53:56"
+   },
+   {
+    "id": 9,
+    "speaker_label": "Bilal Ahmed",
+    "text": "Proposal ready hai, Monday ko bhej doon ga.",
+    "start_time": 7,
+    "end_time": 13,
+    "source": "live",
+    "created_at": "2026-10-09T06:53:56"
+   }
+  ]
+ },
+ "/api/tasks/meeting/3": [
+  {
+   "id": 7,
+   "meeting_id": 3,
+   "meeting_title": "Weekly Team Sync",
+   "assignee": "Bilal Ahmed",
+   "assignee_user_id": 2,
+   "assignee_email": "bilal@nexora-demo.com",
+   "assigned_by": "Ayesha Khan",
+   "task": "Send the proposal to the new client",
+   "deadline": "Monday",
+   "due_at": "2026-10-12T06:53:56.481941",
+   "priority": "medium",
+   "status": "done",
+   "is_overdue": false,
+   "completed_at": "2026-10-09T10:06:57",
+   "created_at": "2026-10-09T06:53:56",
+   "updated_at": "2026-10-09T06:53:56"
+  }
+ ],
+ "/api/meetings/3/recording": {
+  "id": 3,
+  "meeting_id": 3,
+  "enabled": false,
+  "consent_given_at": null,
+  "file_path": null,
+  "file_size_bytes": null,
+  "created_at": "2026-10-09T09:58:39"
+ },
+ "/api/meetings/3/refine": {
+  "meeting_id": 3,
+  "status": "idle",
+  "progress": 0,
+  "model": "",
+  "message": "",
+  "segments": 0
+ },
+ "/api/meetings/3/speakers": [
+  {
+   "id": 7,
+   "meeting_id": 3,
+   "speaker_label": "Ayesha Khan",
+   "display_name": "Ayesha Khan"
+  },
+  {
+   "id": 8,
+   "meeting_id": 3,
+   "speaker_label": "Bilal Ahmed",
+   "display_name": "Bilal Ahmed"
+  }
+ ],
+ "/api/agent/status/3": {
+  "meeting_id": 3,
+  "state": "COMPLETE",
+  "platform": "zoom",
+  "is_connected": false,
+  "simulated": false,
+  "active_speaker": null,
+  "participants": [],
+  "error": null,
+  "mic_captured": null
+ },
+ "/api/meetings/3/voice-reply/latest": {
+  "meeting_id": 3,
+  "reply": null
+ }
+}

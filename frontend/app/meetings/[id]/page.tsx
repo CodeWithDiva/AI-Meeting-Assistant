@@ -23,6 +23,7 @@ import {
   TaskPriority,
   TeamMember,
 } from "@/lib/api";
+import { DEMO_MODE } from "@/lib/demo";
 import { dueInfo, formatDateTime, toLocalInput } from "@/lib/format";
 
 export default function MeetingDetailPage() {
@@ -127,7 +128,7 @@ export default function MeetingDetailPage() {
   }, [meetingId]);
 
   useEffect(() => {
-    if (!meetingId || typeof window === "undefined") return;
+    if (!meetingId || typeof window === "undefined" || DEMO_MODE) return;
     const wsUrl = api.getMeetingWebSocketUrl(meetingId);
     let ws: WebSocket | null = null;
     try {

@@ -1,12 +1,13 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { api, authStorage, Conversation, DirectMessage, TeamMember, User } from "@/lib/api";
+import { DEMO_MODE } from "@/lib/demo";
 import { displayName, initials, relativeTime } from "@/lib/format";
 import Icon from "@/app/components/Icon";
 
-export default function MessagesPage() {
+function MessagesView() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -78,7 +79,7 @@ export default function MessagesPage() {
   }, [router]);
 
   useEffect(() => {
-    if (!me) return;
+    if (!me || DEMO_MODE) return;
     const ws = new WebSocket(api.getMessagesWebSocketUrl());
     wsRef.current = ws;
 
@@ -363,5 +364,14 @@ export default function MessagesPage() {
         }
       `}</style>
     </div>
+  );
+}
+
+// useSearchParams needs a Suspense boundary for the production build.
+export default function MessagesPage() {
+  return (
+    <Suspense fallback={null}>
+      <MessagesView />
+    </Suspense>
   );
 }

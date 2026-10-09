@@ -1,6 +1,7 @@
 /**
  * Centralized API Client & TypeScript Interfaces for AI Meeting Assistant v3
  */
+import { DEMO_MODE, demoDelete, demoLocalOnly, demoRequest } from "./demo";
 
 export interface User {
   id: number;
@@ -363,6 +364,7 @@ async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
+  if (DEMO_MODE) return demoRequest<T>(endpoint, options);
   const token = authStorage.getToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -399,6 +401,7 @@ async function apiRequest<T>(
 
 /** Trigger a file download for an authenticated GET endpoint (blob response). */
 async function downloadFile(endpoint: string, fallbackName: string): Promise<void> {
+  if (DEMO_MODE) demoLocalOnly();
   const token = authStorage.getToken();
   const response = await fetch(`${getApiBase()}${endpoint}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -508,6 +511,7 @@ export const api = {
   },
 
   async deleteMeeting(id: number | string): Promise<void> {
+    if (DEMO_MODE) return demoDelete(`/api/meetings/${id}`);
     const token = authStorage.getToken();
     await fetch(`${getApiBase()}/api/meetings/${id}`, {
       method: "DELETE",
@@ -528,6 +532,7 @@ export const api = {
     meetingId: number | string,
     file: File
   ): Promise<{ filename: string; transcript: string; segment_count?: number }> {
+    if (DEMO_MODE) demoLocalOnly();
     const token = authStorage.getToken();
     const formData = new FormData();
     formData.append("file", file);
@@ -612,6 +617,7 @@ export const api = {
   },
 
   async deleteTask(taskId: number): Promise<void> {
+    if (DEMO_MODE) return demoDelete(`/api/tasks/${taskId}`);
     const token = authStorage.getToken();
     await fetch(`${getApiBase()}/api/tasks/${taskId}`, {
       method: "DELETE",
@@ -716,6 +722,11 @@ export const api = {
     question: string,
     onChunk: (textSoFar: string) => void
   ): Promise<{ question: string; answer: string; sources: Array<{ meeting_id: number; title: string }> }> {
+    if (DEMO_MODE) {
+      const result = await api.askWorkspace(question);
+      onChunk(result.answer);
+      return result;
+    }
     const token = authStorage.getToken();
     const response = await fetch(`${getApiBase()}/api/workspace/ask/stream`, {
       method: "POST",
@@ -875,6 +886,7 @@ export const api = {
   },
 
   async adminDeleteUser(userId: number): Promise<void> {
+    if (DEMO_MODE) demoLocalOnly();
     const token = authStorage.getToken();
     await fetch(`${getApiBase()}/api/auth/admin/users/${userId}`, {
       method: "DELETE",
